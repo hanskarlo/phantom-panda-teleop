@@ -1,0 +1,21 @@
+/phantom_panda_teleop_node:
+  ros__parameters:
+    update_rate: 100.0
+    haptic_base_frame: "touch_x_base"
+    haptic_ee_frame: "touch_x_ee"
+    robot_base_frame: "fr3_link0"
+    robot_ee_frame: "fr3_hand"
+    k_theta: 2.0
+    k_phi: 2.0
+    k_r: 0.5
+    k_roll: 1.0
+    deadband_position: 0.0005
+    cutoff_freq: 5.0
+    rcm_x: 0.4
+    rcm_y: 0.0
+    rcm_z: 0.2
+    tool_length: 0.25
+    gripper_action_name: "/franka_gripper/gripper_action"
+    gripper_open_width: 0.08
+    gripper_close_width: 0.00
+    gripper_force: 10.0

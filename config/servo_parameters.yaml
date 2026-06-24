@@ -1,0 +1,47 @@
+# MoveIt Servo parameters for Franka FR3 robot
+use_gazebo: false
+
+## Properties of incoming commands
+command_in_type: "speed_units" # We will stream TwistStamped velocity commands from our teleop node
+
+# Scale commands (in unitless mode, not used for speed_units)
+scale:
+  linear: 0.6
+  rotational: 0.3
+  joint: 0.1
+
+# Low-pass filter coefficient for smoothing inputs
+low_pass_filter_coeff: 1.5
+
+## Properties of outgoing joint commands
+publish_period: 0.01  # 100 Hz publication loop
+command_out_type: trajectory_msgs/JointTrajectory
+publish_joint_positions: true
+publish_joint_velocities: true
+publish_joint_accelerations: false
+
+# Name of the move group defined in SRDF
+move_group_name: fr3_arm
+
+# Frame in which input commands are specified
+planning_frame: fr3_link0
+
+# Frame of the robot end-effector
+ee_frame_name: fr3_hand
+robot_link_command_frame: fr3_link0
+
+# Input/Output topic names
+cartesian_command_in_topic: ~/delta_twist_cmds  # Resolves to /servo_node/delta_twist_cmds
+joint_topic: /joint_states
+status_topic: ~/status
+command_out_topic: /fr3_arm_controller/joint_trajectory
+
+# Joint limit margins
+joint_limit_margin: 0.05
+
+## Safety and Collision Checking
+check_collisions: true
+collision_check_rate: 15.0
+self_collision_proximity_threshold: 0.01
+scene_collision_proximity_threshold: 0.02
+halt_all_joints_at_collision: true
