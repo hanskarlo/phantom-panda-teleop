@@ -177,6 +177,8 @@ public:
     homing_timer_ = 0.0;
     gripper_open_ = true;
     prev_joy_button2_ = 0;
+    servo_started_ = false;
+    start_servo_client_ = this->create_client<std_srvs::srv::Trigger>("/servo_node/start_servo");
 
     // Run core control loop
     double loop_period_ms = 1000.0 / update_rate_;
@@ -352,7 +354,34 @@ private:
     gripper_action_client_->async_send_goal(goal_msg, send_goal_options);
   }
 
+  void start_moveit_servo() {
+    if (servo_started_) return;
+
+    if (!start_servo_client_->service_is_ready()) {
+      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                           "Waiting for /servo_node/start_servo service...");
+      return;
+    }
+
+    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    servo_started_ = true; // prevent duplicate parallel calls
+    
+    start_servo_client_->async_send_request(
+      request,
+      [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+        auto response = future.get();
+        if (response->success) {
+          RCLCPP_INFO(this->get_logger(), "Successfully started MoveIt Servo.");
+        } else {
+          RCLCPP_ERROR(this->get_logger(), "Failed to start MoveIt Servo: %s", response->message.c_str());
+          servo_started_ = false; // retry on next control loop iteration if failed
+        }
+      });
+  }
+
   void control_loop() {
+    start_moveit_servo();
+
     if (state_ == TeleopState::HOMING) {
       run_homing_logic();
       return;
@@ -643,6 +672,10 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr twist_pub_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr register_rcm_srv_;
   rclcpp_action::Client<control_msgs::action::GripperCommand>::SharedPtr gripper_action_client_;
+
+  // MoveIt Servo start state and client
+  bool servo_started_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr start_servo_client_;
 };
 
 int main(int argc, char **argv) {
