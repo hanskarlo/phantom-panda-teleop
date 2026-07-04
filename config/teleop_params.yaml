@@ -19,3 +19,5 @@
     gripper_open_width: 0.08
     gripper_close_width: 0.00
     gripper_force: 10.0
+    use_rcm: true
+    k_linear: 0.2

@@ -26,6 +26,12 @@ def generate_launch_description():
         description='Full path to the teleoperation parameter file'
     )
 
+    use_rcm_arg = DeclareLaunchArgument(
+        'use_rcm',
+        default_value='true',
+        description='Whether to enable Remote Center of Motion (RCM) trocar constraints'
+    )
+
     # 1. Include Touch Driver Launch
     touch_driver_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -43,12 +49,16 @@ def generate_launch_description():
         executable='phantom_panda_teleop_node',
         name='phantom_panda_teleop_node',
         output='screen',
-        parameters=[LaunchConfiguration('params_file')]
+        parameters=[
+            LaunchConfiguration('params_file'),
+            {'use_rcm': LaunchConfiguration('use_rcm')}
+        ]
     )
 
     return LaunchDescription([
         device_name_arg,
         params_file_arg,
+        use_rcm_arg,
         touch_driver_launch,
         teleop_node
     ])

@@ -114,6 +114,8 @@ public:
     this->declare_parameter("gripper_open_width", 0.08); // 8 cm maximum open width
     this->declare_parameter("gripper_close_width", 0.00);
     this->declare_parameter("gripper_force", 10.0); // 10 N grip force
+    this->declare_parameter("use_rcm", true);
+    this->declare_parameter("k_linear", 0.2);
 
     // Closed-loop proportional tracking gains
     this->declare_parameter("kp_pos", 12.0);
@@ -137,6 +139,8 @@ public:
     this->get_parameter("gripper_open_width", gripper_open_width_);
     this->get_parameter("gripper_close_width", gripper_close_width_);
     this->get_parameter("gripper_force", gripper_force_);
+    this->get_parameter("use_rcm", use_rcm_);
+    this->get_parameter("k_linear", k_linear_);
     this->get_parameter("kp_pos", kp_pos_);
     this->get_parameter("kp_rot", kp_rot_);
     this->get_parameter("max_linear_vel", max_linear_vel_);
@@ -196,6 +200,12 @@ private:
     const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
     (void)request;
+
+    if (!use_rcm_) {
+      response->success = false;
+      response->message = "RCM constraint is currently disabled.";
+      return;
+    }
 
     // Lookup current robot pose
     geometry_msgs::msg::TransformStamped robot_tf;
@@ -290,36 +300,48 @@ private:
       haptic_tf.transform.rotation.z
     );
 
-    // Register initial robot state relative to registered RCM
-    Eigen::Vector3d p_ee_start(
+    // Register initial robot state
+    robot_start_pos_ = Eigen::Vector3d(
       robot_tf.transform.translation.x,
       robot_tf.transform.translation.y,
       robot_tf.transform.translation.z
     );
 
-    // Compute relative distance from RCM
-    Eigen::Vector3d u_start = (p_ee_start - rcm_position_);
-    double lambda_ee_start = u_start.norm();
-    if (lambda_ee_start < 1e-4) {
-      RCLCPP_ERROR(this->get_logger(), "Robot EE start position coincides with RCM! Check calibrations.");
-      return false;
+    robot_start_rot_ = Eigen::Quaterniond(
+      robot_tf.transform.rotation.w,
+      robot_tf.transform.rotation.x,
+      robot_tf.transform.rotation.y,
+      robot_tf.transform.rotation.z
+    );
+
+    if (use_rcm_) {
+      // Compute relative distance from RCM
+      Eigen::Vector3d u_start = (robot_start_pos_ - rcm_position_);
+      double lambda_ee_start = u_start.norm();
+      if (lambda_ee_start < 1e-4) {
+        RCLCPP_ERROR(this->get_logger(), "Robot EE start position coincides with RCM! Check calibrations.");
+        return false;
+      }
+      u_start.normalize();
+
+      // Insertion depth initial value
+      r_start_ = tool_length_ - lambda_ee_start;
+
+      // Convert starting tool axis unit vector to spherical angles (azimuth theta, elevation phi)
+      // u = [sin(phi)*cos(theta), sin(phi)*sin(theta), cos(phi)]
+      phi_start_ = std::acos(u_start.z());
+      theta_start_ = std::atan2(u_start.y(), u_start.x());
+
+      // Log tracking target info
+      RCLCPP_INFO(this->get_logger(), "Teleop values locked (RCM active): theta0=%.2f deg, phi0=%.2f deg, r0=%.3f m",
+                  theta_start_ * 180.0 / M_PI, phi_start_ * 180.0 / M_PI, r_start_);
+    } else {
+      RCLCPP_INFO(this->get_logger(), "Teleop values locked (RCM disabled): robot_start_pos=[%.3f, %.3f, %.3f]",
+                  robot_start_pos_.x(), robot_start_pos_.y(), robot_start_pos_.z());
     }
-    u_start.normalize();
-
-    // Insertion depth initial value
-    r_start_ = tool_length_ - lambda_ee_start;
-
-    // Convert starting tool axis unit vector to spherical angles (azimuth theta, elevation phi)
-    // u = [sin(phi)*cos(theta), sin(phi)*sin(theta), -cos(phi)]
-    phi_start_ = std::acos(-u_start.z());
-    theta_start_ = std::atan2(u_start.y(), u_start.x());
 
     // Filter reset
     butterworth_filter_.reset();
-
-    // Log tracking target info
-    RCLCPP_INFO(this->get_logger(), "Teleop values locked: theta0=%.2f deg, phi0=%.2f deg, r0=%.3f m",
-                theta_start_ * 180.0 / M_PI, phi_start_ * 180.0 / M_PI, r_start_);
     return true;
   }
 
@@ -482,9 +504,15 @@ private:
     twist_pub_->publish(twist_msg);
 
     if (t >= 1.0) {
-      // Transition to registration mode
-      state_ = TeleopState::REGISTRATION;
-      RCLCPP_INFO(this->get_logger(), "Robot reached home posture. Transitioned to REGISTRATION. Please align tool and register RCM.");
+      if (use_rcm_) {
+        // Transition to registration mode
+        state_ = TeleopState::REGISTRATION;
+        RCLCPP_INFO(this->get_logger(), "Robot reached home posture. Transitioned to REGISTRATION. Please align tool and register RCM.");
+      } else {
+        // Skip registration, go straight to CLUTCHED
+        state_ = TeleopState::CLUTCHED;
+        RCLCPP_INFO(this->get_logger(), "Robot reached home posture. RCM disabled, transitioning straight to CLUTCHED state.");
+      }
     }
   }
 
@@ -541,61 +569,73 @@ private:
     // 3. Apply Butterworth filter to suppress user tremor
     Eigen::Vector3d filtered_disp = butterworth_filter_.filter(deadbanded_disp);
 
-    // 4. Map displacements to Spherical Coordinates pivoting about registered trocar
-    double theta = theta_start_ + k_theta_ * filtered_disp.x(); // Stylus Left/Right maps to azimuth
-    double phi = phi_start_ + k_phi_ * filtered_disp.y();     // Stylus Up/Down maps to elevation
-    double r = r_start_ + k_r_ * filtered_disp.z();         // Stylus In/Out maps to depth
+    Eigen::Vector3d cmd_pos;
+    Eigen::Quaterniond cmd_q;
 
-    // Safety limits for trocar angles and insertion depths
-    phi = std::clamp(phi, 0.0, 0.52); // Max 30 deg tilt to protect port boundaries
-    r = std::clamp(r, 0.05, tool_length_ - 0.02); // Protect tool tip collisions and flange over-extension
+    if (use_rcm_) {
+      // 4. Map displacements to Spherical Coordinates pivoting about registered trocar
+      double theta = theta_start_ + k_theta_ * filtered_disp.x(); // Stylus Left/Right maps to azimuth
+      double phi = phi_start_ + k_phi_ * filtered_disp.y();     // Stylus Up/Down maps to elevation
+      double r = r_start_ + k_r_ * filtered_disp.z();         // Stylus In/Out maps to depth
 
-    // 5. Reconstruct tool axis vector pointing from RCM towards end-effector
-    Eigen::Vector3d u;
-    u.x() = std::sin(phi) * std::cos(theta);
-    u.y() = std::sin(phi) * std::sin(theta);
-    u.z() = -std::cos(phi);
+      // Safety limits for trocar angles and insertion depths
+      phi = std::clamp(phi, 0.0, 0.52); // Max 30 deg tilt to protect port boundaries
+      r = std::clamp(r, 0.05, tool_length_ - 0.02); // Protect tool tip collisions and flange over-extension
 
-    // 6. Compute new Cartesian target for the robot end-effector flange
-    double lambda_ee = tool_length_ - r;
-    Eigen::Vector3d cmd_pos = rcm_position_ + lambda_ee * u;
+      // 5. Reconstruct tool axis vector pointing from RCM towards end-effector
+      Eigen::Vector3d u;
+      u.x() = std::sin(phi) * std::cos(theta);
+      u.y() = std::sin(phi) * std::sin(theta);
+      u.z() = std::cos(phi);
 
-    // 7. Compute target orientation matrix (Align flange Z-axis pointing along tool shaft)
-    Eigen::Vector3d z_ee = -u; // Point along the shaft from EE to Trocar
-    Eigen::Vector3d v_up(0.0, 0.0, 1.0); // reference frame alignment vector
-    Eigen::Vector3d y_ee = z_ee.cross(v_up);
-    if (y_ee.norm() < 1e-4) {
-      // Singularity fallback (tool points exactly along vertical vector)
-      y_ee = Eigen::Vector3d(0.0, 1.0, 0.0);
+      // 6. Compute new Cartesian target for the robot end-effector flange
+      double lambda_ee = tool_length_ - r;
+      cmd_pos = rcm_position_ + lambda_ee * u;
+
+      // 7. Compute target orientation matrix (Align flange Z-axis pointing along tool shaft)
+      Eigen::Vector3d z_ee = -u; // Point along the shaft from EE to Trocar
+      Eigen::Vector3d v_up(0.0, 0.0, 1.0); // reference frame alignment vector
+      Eigen::Vector3d y_ee = z_ee.cross(v_up);
+      if (y_ee.norm() < 1e-4) {
+        // Singularity fallback (tool points exactly along vertical vector)
+        y_ee = Eigen::Vector3d(0.0, 1.0, 0.0);
+      } else {
+        y_ee.normalize();
+      }
+      Eigen::Vector3d x_ee = y_ee.cross(z_ee);
+      x_ee.normalize();
+
+      Eigen::Matrix3d R_cmd;
+      R_cmd.col(0) = x_ee;
+      R_cmd.col(1) = y_ee;
+      R_cmd.col(2) = z_ee;
+
+      // 8. Compute relative stylus roll and apply rotation around tool axis
+      Eigen::Vector3d initial_pointer = haptic_start_rot_.toRotationMatrix().col(2);
+      Eigen::Vector3d initial_side = haptic_start_rot_.toRotationMatrix().col(0);
+      Eigen::Vector3d current_side = haptic_rot.toRotationMatrix().col(0);
+
+      // Project current side onto plane perp to initial pointer
+      Eigen::Vector3d side_proj = current_side - (current_side.dot(initial_pointer)) * initial_pointer;
+      double roll_angle = 0.0;
+      if (side_proj.norm() > 1e-4) {
+        side_proj.normalize();
+        double sin_roll = (initial_side.cross(side_proj)).dot(initial_pointer);
+        double cos_roll = initial_side.dot(side_proj);
+        roll_angle = std::atan2(sin_roll, cos_roll);
+      }
+
+      double cmd_roll = k_roll_ * roll_angle;
+      Eigen::AngleAxisd roll_rot(cmd_roll, z_ee);
+      cmd_q = Eigen::Quaterniond(roll_rot * R_cmd);
     } else {
-      y_ee.normalize();
+      // Direct Cartesian mapping with scaling factor k_linear_
+      cmd_pos = robot_start_pos_ + k_linear_ * filtered_disp;
+
+      // Map relative stylus rotation directly to robot end-effector
+      Eigen::Quaterniond rel_rot = haptic_start_rot_.inverse() * haptic_rot;
+      cmd_q = robot_start_rot_ * rel_rot;
     }
-    Eigen::Vector3d x_ee = y_ee.cross(z_ee);
-    x_ee.normalize();
-
-    Eigen::Matrix3d R_cmd;
-    R_cmd.col(0) = x_ee;
-    R_cmd.col(1) = y_ee;
-    R_cmd.col(2) = z_ee;
-
-    // 8. Compute relative stylus roll and apply rotation around tool axis
-    Eigen::Vector3d initial_pointer = haptic_start_rot_.toRotationMatrix().col(2);
-    Eigen::Vector3d initial_side = haptic_start_rot_.toRotationMatrix().col(0);
-    Eigen::Vector3d current_side = haptic_rot.toRotationMatrix().col(0);
-
-    // Project current side onto plane perp to initial pointer
-    Eigen::Vector3d side_proj = current_side - (current_side.dot(initial_pointer)) * initial_pointer;
-    double roll_angle = 0.0;
-    if (side_proj.norm() > 1e-4) {
-      side_proj.normalize();
-      double sin_roll = (initial_side.cross(side_proj)).dot(initial_pointer);
-      double cos_roll = initial_side.dot(side_proj);
-      roll_angle = std::atan2(sin_roll, cos_roll);
-    }
-
-    double cmd_roll = k_roll_ * roll_angle;
-    Eigen::AngleAxisd roll_rot(cmd_roll, z_ee);
-    Eigen::Quaterniond cmd_q(roll_rot * R_cmd);
 
     // 9. Closed-loop Proportional Controller to generate TwistStamped velocity commands
     Eigen::Vector3d p_err = cmd_pos - p_curr;
@@ -652,6 +692,12 @@ private:
   Eigen::Vector3d haptic_start_pos_;
   Eigen::Quaterniond haptic_start_rot_;
   double theta_start_, phi_start_, r_start_;
+
+  // Direct Cartesian tracking start offsets
+  Eigen::Vector3d robot_start_pos_;
+  Eigen::Quaterniond robot_start_rot_;
+  bool use_rcm_;
+  double k_linear_;
 
   // Homing variables
   double homing_timer_;
