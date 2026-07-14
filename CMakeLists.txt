@@ -42,7 +42,7 @@ ament_target_dependencies(
 install(TARGETS phantom_panda_teleop_node
   DESTINATION lib/${PROJECT_NAME})
 
-install(DIRECTORY config launch
+install(DIRECTORY config launch urdf
   DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)

@@ -1,0 +1,33 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="fr3">
+
+  <!-- Include the original FR3 robot description from franka_description package -->
+  <xacro:include filename="$(find franka_description)/robots/fr3/fr3.urdf.xacro"/>
+
+  <!-- Placeholder for BioRob 2026 Custom End-Effector / Trocar Tool -->
+  <!-- Once the physical tool design is finalized, uncomment and modify this block -->
+  <!--
+  <link name="biorob_custom_tool">
+    <visual>
+      <origin xyz="0 0 0.125" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="0.25" radius="0.005"/>
+      </geometry>
+      <material name="silver">
+        <color rgba="0.8 0.8 0.8 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.125" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="0.25" radius="0.005"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="biorob_tool_joint" type="fixed">
+    <parent link="fr3_hand"/>
+    <child link="biorob_custom_tool"/>
+    <origin xyz="0 0 0.0" rpy="0 0 0"/>
+  </joint>
+  -->
+</robot>
