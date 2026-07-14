@@ -171,6 +171,8 @@ public:
     // Setup calibration services
     register_rcm_srv_ = this->create_service<std_srvs::srv::Trigger>(
       "~/register_rcm", std::bind(&PhantomPandaTeleopNode::register_rcm_callback, this, std::placeholders::_1, std::placeholders::_2));
+    proceed_srv_ = this->create_service<std_srvs::srv::Trigger>(
+      "~/proceed", std::bind(&PhantomPandaTeleopNode::proceed_callback, this, std::placeholders::_1, std::placeholders::_2));
 
     // Setup gripper action client
     gripper_action_client_ = rclcpp_action::create_client<control_msgs::action::GripperCommand>(
@@ -248,11 +250,45 @@ private:
     }
   }
 
+  void proceed_callback(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+    (void)request;
+
+    if (state_ == TeleopState::HOMING) {
+      if (use_rcm_) {
+        state_ = TeleopState::REGISTRATION;
+        response->success = true;
+        response->message = "Transitioned from HOMING to REGISTRATION. Please align tool and register RCM.";
+      } else {
+        state_ = TeleopState::CLUTCHED;
+        response->success = true;
+        response->message = "Transitioned from HOMING to CLUTCHED.";
+      }
+      RCLCPP_INFO(this->get_logger(), "%s", response->message.c_str());
+    } else {
+      response->success = false;
+      response->message = "Proceed command is only valid in HOMING state.";
+    }
+  }
+
   void joy_callback(const sensor_msgs::msg::Joy::SharedPtr msg) {
     if (msg->buttons.size() < 2) return;
 
     int button1 = msg->buttons[0]; // Front button (Clutch deadman switch)
     int button2 = msg->buttons[1]; // Rear button (Gripper toggle)
+
+    // Handle transition out of HOMING state if button1 is engaged
+    if (state_ == TeleopState::HOMING && button1 == 1) {
+      if (use_rcm_) {
+        state_ = TeleopState::REGISTRATION;
+        RCLCPP_INFO(this->get_logger(), "Transitioned from HOMING to REGISTRATION. Please align tool and register RCM.");
+      } else {
+        state_ = TeleopState::CLUTCHED;
+        RCLCPP_INFO(this->get_logger(), "Transitioned from HOMING to CLUTCHED.");
+      }
+      return;
+    }
 
     // Handle deadman clutch logic
     if (state_ == TeleopState::CLUTCHED && button1 == 1) {
@@ -438,82 +474,9 @@ private:
   }
 
   void run_homing_logic() {
-    // Smoothly guide robot from current pose to initial safe start pose above box
-    geometry_msgs::msg::TransformStamped robot_tf;
-    try {
-      robot_tf = tf_buffer_->lookupTransform(robot_base_frame_, robot_ee_frame_, tf2::TimePointZero);
-    } catch (const tf2::TransformException &ex) {
-      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Waiting for robot transforms: %s", ex.what());
-      return;
-    }
-
-    // Predefined home position
-    Eigen::Vector3d home_pos(0.4, 0.0, 0.45);
-    // Home orientation: Z-axis pointing straight down (rotation of 180 degrees around X)
-    Eigen::Quaterniond home_rot(0.0, 1.0, 0.0, 0.0);
-
-    Eigen::Vector3d p_curr(
-      robot_tf.transform.translation.x,
-      robot_tf.transform.translation.y,
-      robot_tf.transform.translation.z
-    );
-    Eigen::Quaterniond q_curr(
-      robot_tf.transform.rotation.w,
-      robot_tf.transform.rotation.x,
-      robot_tf.transform.rotation.y,
-      robot_tf.transform.rotation.z
-    );
-
-    // If first iteration of homing, record start pose
-    if (homing_timer_ == 0.0) {
-      homing_start_pos_ = p_curr;
-      homing_start_rot_ = q_curr;
-      RCLCPP_INFO(this->get_logger(), "Starting homing trajectory interpolation...");
-    }
-
-    homing_timer_ += (1.0 / update_rate_);
-    double duration = 4.0; // 4 seconds homing duration
-    double t = std::min(homing_timer_ / duration, 1.0);
-
-    // Linear interpolation of position and spherical linear interpolation (slerp) of orientation
-    Eigen::Vector3d target_pos = homing_start_pos_ + t * (home_pos - homing_start_pos_);
-    Eigen::Quaterniond target_rot = homing_start_rot_.slerp(t, home_rot);
-
-    // Proportional control towards target trajectory
-    Eigen::Vector3d p_err = target_pos - p_curr;
-    Eigen::Quaterniond q_err = target_rot * q_curr.inverse();
-    Eigen::AngleAxisd angle_axis(q_err);
-    Eigen::Vector3d rot_err = angle_axis.angle() * angle_axis.axis();
-
-    Eigen::Vector3d v_cmd = kp_pos_ * p_err;
-    Eigen::Vector3d w_cmd = kp_rot_ * rot_err;
-
-    // Velocity limits
-    if (v_cmd.norm() > max_linear_vel_) v_cmd = v_cmd.normalized() * max_linear_vel_;
-    if (w_cmd.norm() > max_angular_vel_) w_cmd = w_cmd.normalized() * max_angular_vel_;
-
-    geometry_msgs::msg::TwistStamped twist_msg;
-    twist_msg.header.stamp = this->get_clock()->now();
-    twist_msg.header.frame_id = robot_base_frame_;
-    twist_msg.twist.linear.x = v_cmd.x();
-    twist_msg.twist.linear.y = v_cmd.y();
-    twist_msg.twist.linear.z = v_cmd.z();
-    twist_msg.twist.angular.x = w_cmd.x();
-    twist_msg.twist.angular.y = w_cmd.y();
-    twist_msg.twist.angular.z = w_cmd.z();
-    twist_pub_->publish(twist_msg);
-
-    if (t >= 1.0) {
-      if (use_rcm_) {
-        // Transition to registration mode
-        state_ = TeleopState::REGISTRATION;
-        RCLCPP_INFO(this->get_logger(), "Robot reached home posture. Transitioned to REGISTRATION. Please align tool and register RCM.");
-      } else {
-        // Skip registration, go straight to CLUTCHED
-        state_ = TeleopState::CLUTCHED;
-        RCLCPP_INFO(this->get_logger(), "Robot reached home posture. RCM disabled, transitioning straight to CLUTCHED state.");
-      }
-    }
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                         "HOMING: Manually guide the robot, then press the haptic front button or call the ~/proceed service to continue.");
+    publish_zero_velocity();
   }
 
   void run_active_mapping() {
@@ -717,6 +680,7 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr twist_pub_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr register_rcm_srv_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr proceed_srv_;
   rclcpp_action::Client<control_msgs::action::GripperCommand>::SharedPtr gripper_action_client_;
 
   // MoveIt Servo start state and client
