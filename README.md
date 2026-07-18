@@ -30,6 +30,24 @@ The node operates a strict internal state machine to manage safety, calibration,
 * **`ACTIVE`**: The deadman clutch is engaged (Button 1 = `1`). Stylus movements are dynamically mapped to the robot, enforcing the RCM constraint.
 * **`SAFETY_HALT`**: Halts all robot motions immediately if safety violations, singularities, or collisions are detected.
 
+```mermaid
+stateDiagram-v2
+    [*] --> HOMING
+
+    HOMING --> REGISTRATION : Haptic Button 1 press OR ~/proceed service\n[if use_rcm == true]
+    HOMING --> CLUTCHED : Haptic Button 1 press OR ~/proceed service\n[if use_rcm == false]
+
+    REGISTRATION --> CLUTCHED : ~/register_rcm service
+
+    CLUTCHED --> ACTIVE : Haptic Button 1 press (Clutch Engaged)
+    ACTIVE --> CLUTCHED : Haptic Button 1 release (Clutch Disengaged)
+    ACTIVE --> CLUTCHED : Max velocity exceeded (Haptic Warning)
+
+    ACTIVE --> SAFETY_HALT : TF lookup fails OR haptic data is stale (age > timeout)
+
+    SAFETY_HALT --> HOMING : ~/proceed service (System Reset)
+```
+
 ---
 
 ## 📐 Remote Center of Motion (RCM) Formulation
@@ -51,7 +69,7 @@ All parameters are configured in [config/teleop_params.yaml](file:///home/tbs-pa
 
 | Parameter Name | Data Type | Default Value | Description |
 | :--- | :--- | :--- | :--- |
-| `update_rate` | `double` | `100.0` | Execution frequency (Hz) of the core control and publication loop. |
+| `update_rate` | `double` | `200.0` | Execution frequency (Hz) of the core control and publication loop. |
 | `haptic_base_frame` | `string` | `"touch_x_base"` | TF frame ID representing the base of the haptic device. |
 | `haptic_ee_frame` | `string` | `"touch_x_ee"` | TF frame ID representing the end-effector/stylus of the haptic device. |
 | `robot_base_frame` | `string` | `"fr3_link0"` | TF frame ID representing the base of the Franka robot. |

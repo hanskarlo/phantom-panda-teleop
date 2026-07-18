@@ -5,6 +5,7 @@
 #include <sensor_msgs/msg/joy.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include <franka_msgs/srv/set_full_collision_behavior.hpp>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -95,7 +96,7 @@ class PhantomPandaTeleopNode : public rclcpp::Node {
 public:
   PhantomPandaTeleopNode() : Node("phantom_panda_teleop_node") {
     // Declare and retrieve parameters
-    this->declare_parameter("update_rate", 100.0);
+    this->declare_parameter("update_rate", 200.0);
     this->declare_parameter("haptic_base_frame", "touch_x_base");
     this->declare_parameter("haptic_ee_frame", "touch_x_ee");
     this->declare_parameter("robot_base_frame", "fr3_link0");
@@ -116,6 +117,7 @@ public:
     this->declare_parameter("gripper_force", 10.0); // 10 N grip force
     this->declare_parameter("use_rcm", true);
     this->declare_parameter("k_linear", 0.2);
+    this->declare_parameter("haptic_timeout", 0.05); // 50 ms timeout
 
     // Closed-loop proportional tracking gains
     this->declare_parameter("kp_pos", 12.0);
@@ -141,10 +143,21 @@ public:
     this->get_parameter("gripper_force", gripper_force_);
     this->get_parameter("use_rcm", use_rcm_);
     this->get_parameter("k_linear", k_linear_);
+    this->get_parameter("haptic_timeout", haptic_timeout_);
     this->get_parameter("kp_pos", kp_pos_);
     this->get_parameter("kp_rot", kp_rot_);
     this->get_parameter("max_linear_vel", max_linear_vel_);
     this->get_parameter("max_angular_vel", max_angular_vel_);
+
+    this->declare_parameter("maximize_collision_thresholds", true);
+    this->get_parameter("maximize_collision_thresholds", maximize_collision_thresholds_);
+
+    set_collision_behavior_client_ = this->create_client<franka_msgs::srv::SetFullCollisionBehavior>(
+      "/service_server/set_full_collision_behavior");
+
+    // Setup output twist command filtering
+    twist_linear_filter_.setup(cutoff_freq_, update_rate_);
+    twist_angular_filter_.setup(cutoff_freq_, update_rate_);
 
     // Set initial RCM coordinates
     rcm_position_ = Eigen::Vector3d(
@@ -152,6 +165,11 @@ public:
       this->get_parameter("rcm_y").as_double(),
       this->get_parameter("rcm_z").as_double()
     );
+
+    // Initialize haptic-to-robot frame rotation matrix
+    R_h_r_ << 0.0,  0.0, -1.0,
+             -1.0,  0.0,  0.0,
+              0.0,  1.0,  0.0;
 
     // Setup filtering
     butterworth_filter_.setup(cutoff_freq_, update_rate_);
@@ -182,6 +200,7 @@ public:
     state_ = TeleopState::HOMING;
     homing_timer_ = 0.0;
     gripper_open_ = true;
+    prev_joy_button1_ = 0;
     prev_joy_button2_ = 0;
     servo_started_ = false;
     start_servo_client_ = this->create_client<std_srvs::srv::Trigger>("/servo_node/start_servo");
@@ -266,9 +285,14 @@ private:
         response->message = "Transitioned from HOMING to CLUTCHED.";
       }
       RCLCPP_INFO(this->get_logger(), "%s", response->message.c_str());
+    } else if (state_ == TeleopState::SAFETY_HALT) {
+      state_ = TeleopState::HOMING;
+      response->success = true;
+      response->message = "Reset from SAFETY_HALT to HOMING. Please ensure haptic device is connected and healthy.";
+      RCLCPP_INFO(this->get_logger(), "%s", response->message.c_str());
     } else {
       response->success = false;
-      response->message = "Proceed command is only valid in HOMING state.";
+      response->message = "Proceed command is only valid in HOMING or SAFETY_HALT state.";
     }
   }
 
@@ -278,8 +302,19 @@ private:
     int button1 = msg->buttons[0]; // Front button (Clutch deadman switch)
     int button2 = msg->buttons[1]; // Rear button (Gripper toggle)
 
+    // Check for haptic device warnings (e.g. max velocity exceeded)
+    if (msg->buttons.size() >= 3 && msg->buttons[2] == 1) {
+      if (state_ == TeleopState::ACTIVE) {
+        RCLCPP_WARN(this->get_logger(), "Haptic device exceeded max velocity! Disengaging active control and transitioning to CLUTCHED.");
+        state_ = TeleopState::CLUTCHED;
+      }
+      prev_joy_button1_ = button1;
+      prev_joy_button2_ = button2;
+      return;
+    }
+
     // Handle transition out of HOMING state if button1 is engaged
-    if (state_ == TeleopState::HOMING && button1 == 1) {
+    if (state_ == TeleopState::HOMING && button1 == 1 && prev_joy_button1_ == 0) {
       if (use_rcm_) {
         state_ = TeleopState::REGISTRATION;
         RCLCPP_INFO(this->get_logger(), "Transitioned from HOMING to REGISTRATION. Please align tool and register RCM.");
@@ -287,12 +322,13 @@ private:
         state_ = TeleopState::CLUTCHED;
         RCLCPP_INFO(this->get_logger(), "Transitioned from HOMING to CLUTCHED.");
       }
+      prev_joy_button1_ = button1;
       return;
     }
 
     // Handle deadman clutch logic
-    if (state_ == TeleopState::CLUTCHED && button1 == 1) {
-      // Transition to ACTIVE
+    if (state_ == TeleopState::CLUTCHED && button1 == 1 && prev_joy_button1_ == 0) {
+      // Transition to ACTIVE on rising edge of button1
       if (initialize_active_mapping()) {
         state_ = TeleopState::ACTIVE;
         RCLCPP_INFO(this->get_logger(), "Clutch engaged -> ACTIVE state.");
@@ -307,6 +343,7 @@ private:
     if (button2 == 1 && prev_joy_button2_ == 0) {
       toggle_gripper();
     }
+    prev_joy_button1_ = button1;
     prev_joy_button2_ = button2;
   }
 
@@ -319,6 +356,15 @@ private:
       robot_tf = tf_buffer_->lookupTransform(robot_base_frame_, robot_ee_frame_, tf2::TimePointZero);
     } catch (const tf2::TransformException &ex) {
       RCLCPP_WARN(this->get_logger(), "Could not initialize ACTIVE mapping: %s", ex.what());
+      return false;
+    }
+
+    // Check if haptic TF is stale before starting
+    rclcpp::Time now = this->get_clock()->now();
+    rclcpp::Time haptic_time = haptic_tf.header.stamp;
+    double age = (now - haptic_time).seconds();
+    if (age > haptic_timeout_) {
+      RCLCPP_ERROR(this->get_logger(), "Cannot initialize ACTIVE mapping: Haptic transform is stale (age: %.3f s, timeout: %.3f s).", age, haptic_timeout_);
       return false;
     }
 
@@ -378,6 +424,13 @@ private:
 
     // Filter reset
     butterworth_filter_.reset();
+    twist_linear_filter_.reset();
+    twist_angular_filter_.reset();
+
+    // Call service to maximize collision thresholds if configured
+    if (maximize_collision_thresholds_) {
+      maximize_collision_thresholds();
+    }
     return true;
   }
 
@@ -412,6 +465,39 @@ private:
     gripper_action_client_->async_send_goal(goal_msg, send_goal_options);
   }
 
+  void maximize_collision_thresholds() {
+    if (!set_collision_behavior_client_->service_is_ready()) {
+      RCLCPP_WARN(this->get_logger(), "Collision behavior service '/service_server/set_full_collision_behavior' not ready.");
+      return;
+    }
+
+    auto request = std::make_shared<franka_msgs::srv::SetFullCollisionBehavior::Request>();
+    // Maximize nominal and acceleration thresholds for both torque and forces
+    std::fill(request->lower_torque_thresholds_acceleration.begin(), request->lower_torque_thresholds_acceleration.end(), 100.0);
+    std::fill(request->upper_torque_thresholds_acceleration.begin(), request->upper_torque_thresholds_acceleration.end(), 100.0);
+    std::fill(request->lower_torque_thresholds_nominal.begin(), request->lower_torque_thresholds_nominal.end(), 100.0);
+    std::fill(request->upper_torque_thresholds_nominal.begin(), request->upper_torque_thresholds_nominal.end(), 100.0);
+    std::fill(request->lower_force_thresholds_acceleration.begin(), request->lower_force_thresholds_acceleration.end(), 100.0);
+    std::fill(request->upper_force_thresholds_acceleration.begin(), request->upper_force_thresholds_acceleration.end(), 100.0);
+    std::fill(request->lower_force_thresholds_nominal.begin(), request->lower_force_thresholds_nominal.end(), 100.0);
+    std::fill(request->upper_force_thresholds_nominal.begin(), request->upper_force_thresholds_nominal.end(), 100.0);
+
+    set_collision_behavior_client_->async_send_request(
+      request,
+      [this](rclcpp::Client<franka_msgs::srv::SetFullCollisionBehavior>::SharedFuture future) {
+        try {
+          auto response = future.get();
+          if (response->success) {
+            RCLCPP_INFO(this->get_logger(), "Successfully maximized Franka force/torque collision thresholds to 100.0.");
+          } else {
+            RCLCPP_ERROR(this->get_logger(), "Franka controller failed to set collision thresholds: %s", response->error.c_str());
+          }
+        } catch (const std::exception &e) {
+          RCLCPP_ERROR(this->get_logger(), "Service call to set collision behavior threw an exception: %s", e.what());
+        }
+      });
+  }
+
   void start_moveit_servo() {
     if (servo_started_) return;
 
@@ -439,6 +525,13 @@ private:
 
   void control_loop() {
     start_moveit_servo();
+
+    if (state_ == TeleopState::SAFETY_HALT) {
+      publish_zero_velocity();
+      RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                            "SAFETY HALT: Teleoperation halted due to haptic device failure/timeout. Call ~/proceed to reset.");
+      return;
+    }
 
     if (state_ == TeleopState::HOMING) {
       run_homing_logic();
@@ -487,7 +580,20 @@ private:
       haptic_tf = tf_buffer_->lookupTransform(haptic_base_frame_, haptic_ee_frame_, tf2::TimePointZero);
       robot_tf = tf_buffer_->lookupTransform(robot_base_frame_, robot_ee_frame_, tf2::TimePointZero);
     } catch (const tf2::TransformException &ex) {
-      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Transform lookup failed in ACTIVE loop: %s", ex.what());
+      RCLCPP_ERROR(this->get_logger(), "SAFETY HALT: Transform lookup failed in ACTIVE loop: %s. Halting robot!", ex.what());
+      state_ = TeleopState::SAFETY_HALT;
+      publish_zero_velocity();
+      return;
+    }
+
+    // Check haptic transform freshness
+    rclcpp::Time now = this->get_clock()->now();
+    rclcpp::Time haptic_time = haptic_tf.header.stamp;
+    double age = (now - haptic_time).seconds();
+    if (age > haptic_timeout_) {
+      RCLCPP_ERROR(this->get_logger(), "SAFETY HALT: Haptic transform is stale (age: %.3f s, timeout: %.3f s). Halting robot!", age, haptic_timeout_);
+      state_ = TeleopState::SAFETY_HALT;
+      publish_zero_velocity();
       return;
     }
 
@@ -532,14 +638,17 @@ private:
     // 3. Apply Butterworth filter to suppress user tremor
     Eigen::Vector3d filtered_disp = butterworth_filter_.filter(deadbanded_disp);
 
+    // Transform haptic displacement into robot base frame
+    Eigen::Vector3d mapped_disp = R_h_r_ * filtered_disp;
+
     Eigen::Vector3d cmd_pos;
     Eigen::Quaterniond cmd_q;
 
     if (use_rcm_) {
       // 4. Map displacements to Spherical Coordinates pivoting about registered trocar
-      double theta = theta_start_ + k_theta_ * filtered_disp.x(); // Stylus Left/Right maps to azimuth
-      double phi = phi_start_ + k_phi_ * filtered_disp.y();     // Stylus Up/Down maps to elevation
-      double r = r_start_ + k_r_ * filtered_disp.z();         // Stylus In/Out maps to depth
+      double theta = theta_start_ + k_theta_ * mapped_disp.y(); // Left/Right displacement maps to azimuth
+      double phi = phi_start_ - k_phi_ * mapped_disp.z();     // Up/Down displacement maps to elevation
+      double r = r_start_ + k_r_ * mapped_disp.x();         // Forward/Backward displacement maps to depth
 
       // Safety limits for trocar angles and insertion depths
       phi = std::clamp(phi, 0.0, 0.52); // Max 30 deg tilt to protect port boundaries
@@ -593,11 +702,13 @@ private:
       cmd_q = Eigen::Quaterniond(roll_rot * R_cmd);
     } else {
       // Direct Cartesian mapping with scaling factor k_linear_
-      cmd_pos = robot_start_pos_ + k_linear_ * filtered_disp;
+      cmd_pos = robot_start_pos_ + k_linear_ * mapped_disp;
 
-      // Map relative stylus rotation directly to robot end-effector
+      // Map relative stylus rotation to robot base frame
       Eigen::Quaterniond rel_rot = haptic_start_rot_.inverse() * haptic_rot;
-      cmd_q = robot_start_rot_ * rel_rot;
+      Eigen::Quaterniond q_h_r(R_h_r_);
+      Eigen::Quaterniond rel_rot_robot = q_h_r * rel_rot * q_h_r.inverse();
+      cmd_q = robot_start_rot_ * rel_rot_robot;
     }
 
     // 9. Closed-loop Proportional Controller to generate TwistStamped velocity commands
@@ -609,20 +720,24 @@ private:
     Eigen::Vector3d v_cmd = kp_pos_ * p_err;
     Eigen::Vector3d w_cmd = kp_rot_ * rot_err;
 
+    // Filter output velocity commands to suppress hand tremors and command spikes
+    Eigen::Vector3d v_cmd_filtered = twist_linear_filter_.filter(v_cmd);
+    Eigen::Vector3d w_cmd_filtered = twist_angular_filter_.filter(w_cmd);
+
     // Velocity limits
-    if (v_cmd.norm() > max_linear_vel_) v_cmd = v_cmd.normalized() * max_linear_vel_;
-    if (w_cmd.norm() > max_angular_vel_) w_cmd = w_cmd.normalized() * max_angular_vel_;
+    if (v_cmd_filtered.norm() > max_linear_vel_) v_cmd_filtered = v_cmd_filtered.normalized() * max_linear_vel_;
+    if (w_cmd_filtered.norm() > max_angular_vel_) w_cmd_filtered = w_cmd_filtered.normalized() * max_angular_vel_;
 
     // 10. Publish TwistStamped to MoveIt Servo
     geometry_msgs::msg::TwistStamped twist_msg;
     twist_msg.header.stamp = this->get_clock()->now();
     twist_msg.header.frame_id = robot_base_frame_;
-    twist_msg.twist.linear.x = v_cmd.x();
-    twist_msg.twist.linear.y = v_cmd.y();
-    twist_msg.twist.linear.z = v_cmd.z();
-    twist_msg.twist.angular.x = w_cmd.x();
-    twist_msg.twist.angular.y = w_cmd.y();
-    twist_msg.twist.angular.z = w_cmd.z();
+    twist_msg.twist.linear.x = v_cmd_filtered.x();
+    twist_msg.twist.linear.y = v_cmd_filtered.y();
+    twist_msg.twist.linear.z = v_cmd_filtered.z();
+    twist_msg.twist.angular.x = w_cmd_filtered.x();
+    twist_msg.twist.angular.y = w_cmd_filtered.y();
+    twist_msg.twist.angular.z = w_cmd_filtered.z();
     twist_pub_->publish(twist_msg);
   }
 
@@ -649,6 +764,7 @@ private:
 
   TeleopState state_;
   Eigen::Vector3d rcm_position_;
+  Eigen::Matrix3d R_h_r_;
   Vector3ButterworthFilter butterworth_filter_;
 
   // Clutch start offsets
@@ -661,6 +777,7 @@ private:
   Eigen::Quaterniond robot_start_rot_;
   bool use_rcm_;
   double k_linear_;
+  double haptic_timeout_;
 
   // Homing variables
   double homing_timer_;
@@ -669,6 +786,7 @@ private:
 
   // Gripper state
   bool gripper_open_;
+  int prev_joy_button1_;
   int prev_joy_button2_;
 
   // TF buffers
@@ -686,6 +804,13 @@ private:
   // MoveIt Servo start state and client
   bool servo_started_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr start_servo_client_;
+
+  bool maximize_collision_thresholds_;
+  rclcpp::Client<franka_msgs::srv::SetFullCollisionBehavior>::SharedPtr set_collision_behavior_client_;
+
+  // Filters for smoothing final output twist commands
+  Vector3ButterworthFilter twist_linear_filter_;
+  Vector3ButterworthFilter twist_angular_filter_;
 };
 
 int main(int argc, char **argv) {

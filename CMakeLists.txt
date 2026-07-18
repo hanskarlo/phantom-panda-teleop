@@ -18,6 +18,7 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(moveit_msgs REQUIRED)
 find_package(control_msgs REQUIRED)
+find_package(franka_msgs REQUIRED)
 
 add_executable(phantom_panda_teleop_node src/phantom_panda_teleop_node.cpp)
 target_include_directories(phantom_panda_teleop_node PUBLIC
@@ -37,6 +38,7 @@ ament_target_dependencies(
   "tf2_geometry_msgs"
   "moveit_msgs"
   "control_msgs"
+  "franka_msgs"
 )
 
 install(TARGETS phantom_panda_teleop_node
