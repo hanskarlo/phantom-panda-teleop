@@ -67,11 +67,18 @@ def generate_launch_description():
     namespace = LaunchConfiguration(namespace_parameter_name)
     load_gripper = LaunchConfiguration(load_gripper_parameter_name)
     ee_id = LaunchConfiguration(ee_id_parameter_name)
+    headless = LaunchConfiguration('headless')
 
     # Command-line arguments
 
     db_arg = DeclareLaunchArgument(
         'db', default_value='False', description='Database flag'
+    )
+
+    headless_arg = DeclareLaunchArgument(
+        'headless',
+        default_value='false',
+        description='Whether to run headless (without RViz)'
     )
 
     # planning_context using our custom robot description wrapper
@@ -103,6 +110,10 @@ def generate_launch_description():
 
     kinematics_yaml = load_yaml(
         'phantom_panda_teleop', 'config/kinematics.yaml'
+    )
+
+    joint_limits_yaml = load_yaml(
+        'phantom_panda_teleop', 'config/joint_limits.yaml'
     )
 
     # Planning Functionality
@@ -161,6 +172,7 @@ def generate_launch_description():
             trajectory_execution,
             moveit_controllers,
             planning_scene_monitor_parameters,
+            joint_limits_yaml,
         ],
     )
 
@@ -180,7 +192,9 @@ def generate_launch_description():
             robot_description_semantic,
             ompl_planning_pipeline_config,
             kinematics_yaml,
+            joint_limits_yaml,
         ],
+        condition=UnlessCondition(headless),
     )
 
     # Publish TF
@@ -293,6 +307,7 @@ def generate_launch_description():
          use_fake_hardware_arg,
          fake_sensor_commands_arg,
          db_arg,
+         headless_arg,
          rviz_node,
          robot_state_publisher,
          run_move_group_node,

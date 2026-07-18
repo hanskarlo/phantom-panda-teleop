@@ -53,6 +53,9 @@ def generate_launch_description():
     servo_yaml = load_yaml('phantom_panda_teleop', 'config/servo_parameters.yaml')
     servo_params = {'moveit_servo': servo_yaml}
 
+    # 5. Joint Limits configuration
+    joint_limits_yaml = load_yaml('phantom_panda_teleop', 'config/joint_limits.yaml')
+
     # Start MoveIt Servo Node
     servo_node = Node(
         package='moveit_servo',
@@ -63,7 +66,8 @@ def generate_launch_description():
             robot_description,
             robot_description_semantic,
             robot_description_kinematics,
-            servo_params
+            servo_params,
+            joint_limits_yaml
         ]
     )
 

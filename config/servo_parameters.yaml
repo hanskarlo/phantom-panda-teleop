@@ -6,12 +6,14 @@ command_in_type: "speed_units" # We will stream TwistStamped velocity commands f
 
 # Scale commands (in unitless mode, not used for speed_units)
 scale:
-  linear: 0.6
-  rotational: 0.3
-  joint: 0.1
+  linear: 0.2
+  rotational: 0.1
+  joint: 0.05
 
-# Low-pass filter coefficient for smoothing inputs
-low_pass_filter_coeff: 1.5
+# Motion filtering / smoothing
+use_smoothing: true
+smoothing_filter_plugin_name: "online_signal_smoothing::ButterworthFilterPlugin"
+low_pass_filter_coeff: 2.0
 
 ## Properties of outgoing joint commands
 publish_period: 0.01  # 100 Hz publication loop

@@ -1,6 +1,6 @@
 /phantom_panda_teleop_node:
   ros__parameters:
-    update_rate: 100.0
+    update_rate: 200.0
     haptic_base_frame: "touch_x_base"
     haptic_ee_frame: "touch_x_ee"
     robot_base_frame: "fr3_link0"
@@ -8,7 +8,7 @@
     k_theta: 2.0
     k_phi: 2.0
     k_r: 0.5
-    k_roll: 1.0
+    k_roll: -1.0
     deadband_position: 0.0005
     cutoff_freq: 5.0
     rcm_x: 0.4
@@ -21,3 +21,8 @@
     gripper_force: 10.0
     use_rcm: true
     k_linear: 0.2
+    kp_pos: 3.5
+    kp_rot: 2.5
+    max_linear_vel: 0.05
+    max_angular_vel: 0.2
+    maximize_collision_thresholds: true
