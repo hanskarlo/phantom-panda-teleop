@@ -414,6 +414,31 @@ private:
       phi_start_ = std::acos(u_start.z());
       theta_start_ = std::atan2(u_start.y(), u_start.x());
 
+      if (r_start_ < 0.0 || r_start_ > tool_length_) {
+        RCLCPP_ERROR(this->get_logger(), "Robot EE is physically out of range of RCM. Please reposition.");
+        return false;
+      }
+      if (phi_start_ > 0.52) {
+        RCLCPP_ERROR(this->get_logger(), "Robot is tilted too far from RCM constraint (phi = %.2f rad). Please reposition.", phi_start_);
+        return false;
+      }
+
+      // Calculate the theoretical RCM target orientation at the start
+      Eigen::Vector3d z_ee_start = -u_start;
+      Eigen::Vector3d v_up(0.0, 0.0, 1.0);
+      Eigen::Vector3d y_ee_start = z_ee_start.cross(v_up);
+      if (y_ee_start.norm() < 1e-4) y_ee_start = Eigen::Vector3d(0.0, 1.0, 0.0);
+      else y_ee_start.normalize();
+      Eigen::Vector3d x_ee_start = y_ee_start.cross(z_ee_start).normalized();
+
+      Eigen::Matrix3d R_cmd_start;
+      R_cmd_start.col(0) = x_ee_start;
+      R_cmd_start.col(1) = y_ee_start;
+      R_cmd_start.col(2) = z_ee_start;
+
+      // Ensure orientation continuity by capturing the difference between actual robot pose and theoretical RCM pose
+      orientation_offset_ = robot_start_rot_ * Eigen::Quaterniond(R_cmd_start).inverse();
+
       // Log tracking target info
       RCLCPP_INFO(this->get_logger(), "Teleop values locked (RCM active): theta0=%.2f deg, phi0=%.2f deg, r0=%.3f m",
                   theta_start_ * 180.0 / M_PI, phi_start_ * 180.0 / M_PI, r_start_);
@@ -699,16 +724,22 @@ private:
 
       double cmd_roll = k_roll_ * roll_angle;
       Eigen::AngleAxisd roll_rot(cmd_roll, z_ee);
-      cmd_q = Eigen::Quaterniond(roll_rot * R_cmd);
+      Eigen::Quaterniond base_cmd_q(roll_rot * R_cmd);
+      // Apply offset to ensure continuous transition
+      cmd_q = orientation_offset_ * base_cmd_q;
     } else {
       // Direct Cartesian mapping with scaling factor k_linear_
       cmd_pos = robot_start_pos_ + k_linear_ * mapped_disp;
 
-      // Map relative stylus rotation to robot base frame
-      Eigen::Quaterniond rel_rot = haptic_start_rot_.inverse() * haptic_rot;
+      // Calculate global rotation of haptic device relative to its start orientation
+      Eigen::Quaterniond rel_rot_global = haptic_rot * haptic_start_rot_.inverse();
       Eigen::Quaterniond q_h_r(R_h_r_);
-      Eigen::Quaterniond rel_rot_robot = q_h_r * rel_rot * q_h_r.inverse();
-      cmd_q = robot_start_rot_ * rel_rot_robot;
+      
+      // Transform this global rotation to the robot's base frame
+      Eigen::Quaterniond rel_rot_robot_global = q_h_r * rel_rot_global * q_h_r.inverse();
+      
+      // Apply the global rotation to the robot's starting orientation
+      cmd_q = rel_rot_robot_global * robot_start_rot_;
     }
 
     // 9. Closed-loop Proportional Controller to generate TwistStamped velocity commands
@@ -724,20 +755,29 @@ private:
     Eigen::Vector3d v_cmd_filtered = twist_linear_filter_.filter(v_cmd);
     Eigen::Vector3d w_cmd_filtered = twist_angular_filter_.filter(w_cmd);
 
+    // Transform velocity commands from robot_base_frame_ to robot_ee_frame_ to prevent MoveIt Servo frame confusion
+    Eigen::Vector3d v_cmd_ee = q_curr.inverse() * v_cmd_filtered;
+    Eigen::Vector3d w_cmd_ee = q_curr.inverse() * w_cmd_filtered;
+
     // Velocity limits
-    if (v_cmd_filtered.norm() > max_linear_vel_) v_cmd_filtered = v_cmd_filtered.normalized() * max_linear_vel_;
-    if (w_cmd_filtered.norm() > max_angular_vel_) w_cmd_filtered = w_cmd_filtered.normalized() * max_angular_vel_;
+    if (v_cmd_ee.norm() > max_linear_vel_) v_cmd_ee = v_cmd_ee.normalized() * max_linear_vel_;
+    if (w_cmd_ee.norm() > max_angular_vel_) w_cmd_ee = w_cmd_ee.normalized() * max_angular_vel_;
+
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                         "Tracking | P_err: [%.3f, %.3f, %.3f], R_err: [%.3f, %.3f, %.3f]",
+                         p_err.x(), p_err.y(), p_err.z(), rot_err.x(), rot_err.y(), rot_err.z());
 
     // 10. Publish TwistStamped to MoveIt Servo
     geometry_msgs::msg::TwistStamped twist_msg;
     twist_msg.header.stamp = this->get_clock()->now();
-    twist_msg.header.frame_id = robot_base_frame_;
-    twist_msg.twist.linear.x = v_cmd_filtered.x();
-    twist_msg.twist.linear.y = v_cmd_filtered.y();
-    twist_msg.twist.linear.z = v_cmd_filtered.z();
-    twist_msg.twist.angular.x = w_cmd_filtered.x();
-    twist_msg.twist.angular.y = w_cmd_filtered.y();
-    twist_msg.twist.angular.z = w_cmd_filtered.z();
+    // Explicitly command in the end-effector frame
+    twist_msg.header.frame_id = robot_ee_frame_;
+    twist_msg.twist.linear.x = v_cmd_ee.x();
+    twist_msg.twist.linear.y = v_cmd_ee.y();
+    twist_msg.twist.linear.z = v_cmd_ee.z();
+    twist_msg.twist.angular.x = w_cmd_ee.x();
+    twist_msg.twist.angular.y = w_cmd_ee.y();
+    twist_msg.twist.angular.z = w_cmd_ee.z();
     twist_pub_->publish(twist_msg);
   }
 
@@ -775,6 +815,7 @@ private:
   // Direct Cartesian tracking start offsets
   Eigen::Vector3d robot_start_pos_;
   Eigen::Quaterniond robot_start_rot_;
+  Eigen::Quaterniond orientation_offset_; // Offset to ensure C0 continuity for orientation
   bool use_rcm_;
   double k_linear_;
   double haptic_timeout_;

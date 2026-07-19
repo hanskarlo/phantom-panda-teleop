@@ -30,7 +30,7 @@ planning_frame: fr3_link0
 
 # Frame of the robot end-effector
 ee_frame_name: fr3_hand
-robot_link_command_frame: fr3_link0
+robot_link_command_frame: fr3_hand
 
 # Input/Output topic names
 cartesian_command_in_topic: ~/delta_twist_cmds  # Resolves to /servo_node/delta_twist_cmds
