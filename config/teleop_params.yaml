@@ -25,6 +25,12 @@
     rcm_hole_diameter: 0.03
     shaft_marker_extension: 0.15
     rcm_warning_error: 0.002
+    # Reject teleoperation if calibration already leaves the shaft off-axis.
+    rcm_activation_max_error: 0.0015
+    # Freeze before a measured shaft miss can load the trocar boundary.
+    rcm_halt_error: 0.004
+    # Proportional recovery of a small measured RCM miss [1/s].
+    rcm_correction_gain: 3.0
     # Placeholder output for the future custom tool: false=open, true=closed.
     custom_tool_state_topic: "/phantom_panda_teleop_node/custom_tool_closed"
     use_rcm: true

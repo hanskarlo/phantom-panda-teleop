@@ -144,6 +144,9 @@ public:
     this->declare_parameter("rcm_hole_diameter", 0.03);
     this->declare_parameter("shaft_marker_extension", 0.15);
     this->declare_parameter("rcm_warning_error", 0.002);
+    this->declare_parameter("rcm_activation_max_error", 0.0015);
+    this->declare_parameter("rcm_halt_error", 0.004);
+    this->declare_parameter("rcm_correction_gain", 3.0);
     this->declare_parameter("custom_tool_state_topic", "~/custom_tool_closed");
     this->declare_parameter("use_rcm", true);
     this->declare_parameter("k_linear", 0.2);
@@ -200,6 +203,9 @@ public:
     this->get_parameter("rcm_hole_diameter", rcm_hole_diameter_);
     this->get_parameter("shaft_marker_extension", shaft_marker_extension_);
     this->get_parameter("rcm_warning_error", rcm_warning_error_);
+    this->get_parameter("rcm_activation_max_error", rcm_activation_max_error_);
+    this->get_parameter("rcm_halt_error", rcm_halt_error_);
+    this->get_parameter("rcm_correction_gain", rcm_correction_gain_);
     this->get_parameter("custom_tool_state_topic", custom_tool_state_topic_);
     this->get_parameter("use_rcm", use_rcm_);
     this->get_parameter("k_linear", k_linear_);
@@ -268,9 +274,13 @@ public:
               "registration_insertion_depth must lie within the configured insertion limits.");
     }
     if (rcm_hole_diameter_ <= 0.0 || shaft_marker_extension_ < 0.0 ||
-      rcm_warning_error_ < 0.0)
+      rcm_warning_error_ < 0.0 || rcm_activation_max_error_ < 0.0 ||
+      rcm_halt_error_ <= 0.0 || rcm_halt_error_ < rcm_activation_max_error_ ||
+      rcm_correction_gain_ < 0.0)
     {
-      throw std::invalid_argument("RCM visualization dimensions must be nonnegative.");
+      throw std::invalid_argument(
+              "RCM thresholds must be nonnegative, halt error must exceed activation error, "
+              "and correction gain must be nonnegative.");
     }
     if (positioning_mode_ != "fixed" && positioning_mode_ != "haptic_jog" &&
       positioning_mode_ != "physical_guiding")
@@ -1131,6 +1141,17 @@ private:
         return false;
       }
 
+      const double start_rcm_error = phantom_panda_teleop::pointToShaftLineDistance(
+        rcm_position_, robot_start_pos_, rcm_start_z_axis_);
+      if (start_rcm_error > rcm_activation_max_error_) {
+        RCLCPP_ERROR(
+          this->get_logger(),
+          "Robot shaft misses the registered RCM by %.2f mm (activation limit %.2f mm). "
+          "Reposition and re-register before enabling teleoperation.",
+          start_rcm_error * 1000.0, rcm_activation_max_error_ * 1000.0);
+        return false;
+      }
+
       // Log tracking target info
       RCLCPP_INFO(
         this->get_logger(),
@@ -1727,35 +1748,86 @@ private:
       rot_err = angle * q_err_vec / q_err_vec_norm;
     }
 
-    Eigen::Vector3d v_cmd = kp_pos_ * p_err;
-    Eigen::Vector3d w_cmd = kp_rot_ * rot_err;
+    Eigen::Vector3d v_cmd_base;
+    Eigen::Vector3d w_cmd_base;
+    if (enforce_rcm && use_rcm_) {
+      // Enforce the RCM at the *twist* level, not only at the target-pose level.
+      // For a = flange-to-tip unit axis and p_rcm = p_ee + lambda*a:
+      //   d(p_rcm)/dt = v_perp + lambda*(w x a).
+      // Thus v_perp must be derived from w; independently tracking position and
+      // orientation lets the shaft cut across the trocar during large motions.
+      const Eigen::Vector3d shaft_axis = q_curr.toRotationMatrix().col(2).normalized();
+      const double flange_to_rcm = (rcm_position_ - p_curr).dot(shaft_axis);
+      const Eigen::Vector3d closest_rcm_point = p_curr + flange_to_rcm * shaft_axis;
+      const Eigen::Vector3d rcm_residual = closest_rcm_point - rcm_position_;
+      const double rcm_error = rcm_residual.norm();
 
-    // Filter output velocity commands to suppress hand tremors and command spikes
-    Eigen::Vector3d v_cmd_filtered = twist_linear_filter_.filter(v_cmd);
-    Eigen::Vector3d w_cmd_filtered = twist_angular_filter_.filter(w_cmd);
+      if (flange_to_rcm <= 1e-4 || rcm_error > rcm_halt_error_) {
+        RCLCPP_ERROR(
+          this->get_logger(),
+          "SAFETY HALT: RCM geometry invalid (flange-to-RCM %.3f m, shaft miss %.2f mm; "
+          "halt limit %.2f mm).",
+          flange_to_rcm, rcm_error * 1000.0, rcm_halt_error_ * 1000.0);
+        state_ = TeleopState::SAFETY_HALT;
+        publish_zero_velocity();
+        return;
+      }
 
-    // p_err and rot_err are expressed in robot_base_frame_. Keep the Cartesian command
-    // in that same frame. MoveIt Servo Humble uses robot_link_command_frame from its
-    // configuration; converting these values to the EE frame while Servo is consuming
-    // them as planning-frame components makes the physical arm move away from the target.
-    Eigen::Vector3d v_cmd_base = v_cmd_filtered;
-    Eigen::Vector3d w_cmd_base = w_cmd_filtered;
+      // Smooth and rate-limit rotation first. Its final value is then used to
+      // construct the coupled translational velocity, preserving the constraint.
+      Eigen::Vector3d desired_w = twist_angular_filter_.filter(kp_rot_ * rot_err);
+      if (desired_w.norm() > angular_velocity_limit) {
+        desired_w = desired_w.normalized() * angular_velocity_limit;
+      }
+      w_cmd_base = limit_vector_rate(
+        desired_w, previous_angular_velocity_, previous_angular_acceleration_,
+        max_angular_accel_, max_angular_jerk_);
 
-    // Velocity limits
-    if (v_cmd_base.norm() > linear_velocity_limit) {
-      v_cmd_base = v_cmd_base.normalized() * linear_velocity_limit;
+      // The axial component changes insertion only and is unconstrained by the
+      // pivot. Filtering it as a scalar prevents a frame-dependent lateral leak.
+      double axial_velocity = kp_pos_ * p_err.dot(shaft_axis);
+      axial_velocity = twist_linear_filter_.filter(axial_velocity * shaft_axis).dot(shaft_axis);
+      axial_velocity = std::clamp(
+        axial_velocity, -linear_velocity_limit, linear_velocity_limit);
+
+      // A small residual feedback term brings a pre-existing calibration/tracking
+      // miss back to the port. It is zero for an RCM-valid state.
+      Eigen::Vector3d lateral_velocity =
+        -flange_to_rcm * w_cmd_base.cross(shaft_axis) -
+        rcm_correction_gain_ * rcm_residual;
+
+      // Keep the complete coupled twist within the translational speed bound by
+      // scaling only the pivoting component. Do not independently clip v afterward:
+      // that would violate v_perp + lambda*(w x a) = 0 again.
+      const double lateral_limit = std::sqrt(
+        std::max(
+          0.0, linear_velocity_limit * linear_velocity_limit -
+          axial_velocity * axial_velocity));
+      if (lateral_velocity.norm() > lateral_limit && lateral_velocity.norm() > 1e-9) {
+        const double scale = lateral_limit / lateral_velocity.norm();
+        w_cmd_base *= scale;
+        lateral_velocity =
+          -flange_to_rcm * w_cmd_base.cross(shaft_axis) -
+          rcm_correction_gain_ * rcm_residual;
+      }
+      v_cmd_base = axial_velocity * shaft_axis + lateral_velocity;
+    } else {
+      // Non-RCM positioning retains the conventional independently tracked twist.
+      Eigen::Vector3d desired_v = twist_linear_filter_.filter(kp_pos_ * p_err);
+      Eigen::Vector3d desired_w = twist_angular_filter_.filter(kp_rot_ * rot_err);
+      if (desired_v.norm() > linear_velocity_limit) {
+        desired_v = desired_v.normalized() * linear_velocity_limit;
+      }
+      if (desired_w.norm() > angular_velocity_limit) {
+        desired_w = desired_w.normalized() * angular_velocity_limit;
+      }
+      v_cmd_base = limit_vector_rate(
+        desired_v, previous_linear_velocity_, previous_linear_acceleration_,
+        max_linear_accel_, max_linear_jerk_);
+      w_cmd_base = limit_vector_rate(
+        desired_w, previous_angular_velocity_, previous_angular_acceleration_,
+        max_angular_accel_, max_angular_jerk_);
     }
-    if (w_cmd_base.norm() > angular_velocity_limit) {
-      w_cmd_base = w_cmd_base.normalized() * angular_velocity_limit;
-    }
-
-    // Enforce acceleration and jerk bounds after filtering.
-    v_cmd_base = limit_vector_rate(
-      v_cmd_base, previous_linear_velocity_,
-      previous_linear_acceleration_, max_linear_accel_, max_linear_jerk_);
-    w_cmd_base = limit_vector_rate(
-      w_cmd_base, previous_angular_velocity_,
-      previous_angular_acceleration_, max_angular_accel_, max_angular_jerk_);
 
     const double command_norm = v_cmd_base.norm() + w_cmd_base.norm();
     if (command_norm > 1e-4) {
@@ -1835,6 +1907,9 @@ private:
   double rcm_hole_diameter_;
   double shaft_marker_extension_;
   double rcm_warning_error_;
+  double rcm_activation_max_error_;
+  double rcm_halt_error_;
+  double rcm_correction_gain_;
   std::string custom_tool_state_topic_;
 
   // Closed loop parameters
