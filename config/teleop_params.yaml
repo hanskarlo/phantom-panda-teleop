@@ -6,8 +6,13 @@
     robot_base_frame: "fr3_link0"
     robot_ee_frame: "fr3_link8"
     robot_tool_tip_frame: "biorob_tool_tip"
-    # Position-only Cartesian haptic-to-tool-tip mapping. Haptic orientation is ignored.
+    # Haptic position controls the Cartesian tool-tip target. Pitch/yaw are ignored;
+    # stylus roll is mapped to axial roll of the robot tool shaft.
     tip_position_scale: 0.2
+    enable_haptic_roll: true
+    # Touch X positive roll is opposite the tool's positive axial roll.
+    haptic_roll_scale: -1.0
+    haptic_roll_deadband: 0.01
     max_tilt_angle: 0.52
     # Blend shaft direction over the first 20 mm to avoid an orientation step at r=0.
     tip_direction_transition_depth: 0.02

@@ -130,6 +130,9 @@ public:
     this->declare_parameter("robot_ee_frame", "fr3_link8");
     this->declare_parameter("robot_tool_tip_frame", "biorob_tool_tip");
     this->declare_parameter("tip_position_scale", 0.2); // haptic-to-tip Cartesian scale
+    this->declare_parameter("enable_haptic_roll", true);
+    this->declare_parameter("haptic_roll_scale", 1.0);
+    this->declare_parameter("haptic_roll_deadband", 0.01);
     this->declare_parameter("max_tilt_angle", 0.52); // maximum shaft tilt from base +Z
     this->declare_parameter("tip_direction_transition_depth", 0.02);
     this->declare_parameter("deadband_position", 0.0005); // 0.5 mm deadband
@@ -192,6 +195,9 @@ public:
     this->get_parameter("robot_ee_frame", robot_ee_frame_);
     this->get_parameter("robot_tool_tip_frame", robot_tool_tip_frame_);
     this->get_parameter("tip_position_scale", tip_position_scale_);
+    this->get_parameter("enable_haptic_roll", enable_haptic_roll_);
+    this->get_parameter("haptic_roll_scale", haptic_roll_scale_);
+    this->get_parameter("haptic_roll_deadband", haptic_roll_deadband_);
     this->get_parameter("max_tilt_angle", max_tilt_angle_);
     this->get_parameter("tip_direction_transition_depth", tip_direction_transition_depth_);
     this->get_parameter("deadband_position", deadband_position_);
@@ -245,7 +251,8 @@ public:
     {
       throw std::invalid_argument("Update rate and Cartesian motion limits must all be positive.");
     }
-    if (tip_position_scale_ < 0.0 || k_linear_ < 0.0 ||
+    if (tip_position_scale_ < 0.0 || !std::isfinite(haptic_roll_scale_) ||
+      haptic_roll_deadband_ < 0.0 || k_linear_ < 0.0 ||
       max_tilt_angle_ < 0.0 || max_tilt_angle_ >= M_PI_2 ||
       tip_direction_transition_depth_ <= 0.0 ||
       haptic_timeout_ <= 0.0 || robot_state_timeout_ <= 0.0 || command_chain_timeout_ <= 0.0)
@@ -1075,6 +1082,20 @@ private:
       haptic_tf.transform.translation.y,
       haptic_tf.transform.translation.z
     );
+    haptic_last_rot_ = Eigen::Quaterniond(
+      haptic_tf.transform.rotation.w,
+      haptic_tf.transform.rotation.x,
+      haptic_tf.transform.rotation.y,
+      haptic_tf.transform.rotation.z
+    );
+    if (!haptic_last_rot_.coeffs().allFinite() || haptic_last_rot_.norm() < 1e-9) {
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "Cannot initialize ACTIVE mapping: invalid haptic rotation.");
+      return false;
+    }
+    haptic_last_rot_.normalize();
+    haptic_roll_angle_ = 0.0;
 
     // Register initial robot state
     robot_start_pos_ = Eigen::Vector3d(
@@ -1483,6 +1504,24 @@ private:
     command_limiter_initialized_ = false;
   }
 
+  void update_haptic_roll(const Eigen::Quaterniond & haptic_rotation)
+  {
+    // Integrate only the incremental twist about the stylus's current +Z axis.
+    // Pitch and yaw remain position-only inputs and cannot change the tool shaft axis.
+    Eigen::Quaterniond increment = haptic_rotation * haptic_last_rot_.conjugate();
+    increment.normalize();
+    if (increment.w() < 0.0) {
+      increment.coeffs() *= -1.0;
+    }
+    const Eigen::Vector3d roll_axis =
+      haptic_last_rot_.toRotationMatrix().col(2).normalized();
+    const double incremental_roll = 2.0 * std::atan2(
+      Eigen::Vector3d(increment.x(), increment.y(), increment.z()).dot(roll_axis),
+      increment.w());
+    haptic_roll_angle_ += haptic_roll_scale_ * incremental_roll;
+    haptic_last_rot_ = haptic_rotation;
+  }
+
   Eigen::Vector3d limit_vector_rate(
     const Eigen::Vector3d & desired_velocity,
     Eigen::Vector3d & previous_velocity,
@@ -1638,6 +1677,25 @@ private:
       haptic_tf.transform.translation.y,
       haptic_tf.transform.translation.z
     );
+    Eigen::Quaterniond haptic_rot(
+      haptic_tf.transform.rotation.w,
+      haptic_tf.transform.rotation.x,
+      haptic_tf.transform.rotation.y,
+      haptic_tf.transform.rotation.z
+    );
+    if (!haptic_rot.coeffs().allFinite() || haptic_rot.norm() < 1e-9) {
+      RCLCPP_ERROR(this->get_logger(), "SAFETY HALT: Invalid haptic rotation.");
+      state_ = TeleopState::SAFETY_HALT;
+      publish_zero_velocity();
+      return;
+    }
+    haptic_rot.normalize();
+    if (enable_haptic_roll_) {
+      update_haptic_roll(haptic_rot);
+    } else {
+      haptic_last_rot_ = haptic_rot;
+      haptic_roll_angle_ = 0.0;
+    }
 
     Eigen::Vector3d p_curr(
       robot_tf.transform.translation.x,
@@ -1711,7 +1769,10 @@ private:
       const Eigen::Vector3d z_ee = -target.shaft_axis;
       const Eigen::Quaterniond shaft_alignment =
         Eigen::Quaterniond::FromTwoVectors(rcm_start_z_axis_, z_ee);
-      cmd_q = shaft_alignment * robot_start_rot_;
+      const double commanded_roll = std::abs(haptic_roll_angle_) < haptic_roll_deadband_ ?
+        0.0 : haptic_roll_angle_;
+      cmd_q = Eigen::Quaterniond(Eigen::AngleAxisd(commanded_roll, z_ee)) *
+        shaft_alignment * robot_start_rot_;
       cmd_q.normalize();
     } else {
       // Position-only direct Cartesian mapping. Haptic orientation is intentionally ignored.
@@ -1896,6 +1957,9 @@ private:
   std::string robot_ee_frame_;
   std::string robot_tool_tip_frame_;
   double tip_position_scale_;
+  bool enable_haptic_roll_;
+  double haptic_roll_scale_;
+  double haptic_roll_deadband_;
   double max_tilt_angle_;
   double tip_direction_transition_depth_;
   double deadband_position_;
@@ -1929,6 +1993,8 @@ private:
 
   // Clutch start offsets
   Eigen::Vector3d haptic_start_pos_;
+  Eigen::Quaterniond haptic_last_rot_;
+  double haptic_roll_angle_;
 
   // Direct Cartesian tracking start offsets
   Eigen::Vector3d robot_start_pos_;
