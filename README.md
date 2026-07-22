@@ -14,8 +14,8 @@ Below is the high-level data flow representing how the master device controls th
                         (Stylus state)       (Butterworth & Deadband)            (Cartesian Vel)     (Joint Velocities)   (1 kHz limiter)
 ```
 
-1. **Haptic Interface Layer (Master)**: The driver publishes haptic device states (stylus 6-DoF pose and stylus button presses).
-2. **Teleoperation Mapping Node (Core)**: The `phantom_panda_teleop_node` reads haptic stylus movements, filters out tremors, scales inputs down for microscale precision, handles clutch offsets/states, and dynamically enforces RCM constraints.
+1. **Haptic Interface Layer (Master)**: The driver publishes the stylus pose and button presses. Teleoperation consumes only stylus position; stylus orientation is ignored.
+2. **Teleoperation Mapping Node (Core)**: The `phantom_panda_teleop_node` filters and scales the clutch-relative stylus position into a Cartesian tool-tip target, projects that target into the feasible trocar cone and insertion interval, and reconstructs an RCM-valid flange pose.
 3. **Robot Control Layer (Slave)**: MoveIt 2 Servo processes high-rate Cartesian velocity commands (`TwistStamped`), performs real-time inverse kinematics (IK) and safety checks, and streams joint trajectories to `ros2_control` (Franka ROS 2 driver).
 
 ---
@@ -61,7 +61,11 @@ To simulate laparoscopic surgery, the custom tool shaft attachment must always i
 * Tool tip position: $\mathbf{p}_{\text{tip}}(t) = \mathbf{p}_{\text{rcm}} - \lambda_{\text{tip}}(t) \cdot \mathbf{u}(t)$
 * Insertion Depth ($r$): $r = \lambda_{\text{tip}}(t) = L_{\text{tool}} - \lambda_{\text{ee}}(t)$
 
-The node maps haptic stylus $(X, Y)$ displacements to spherical angles Azimuth ($\theta$) and Elevation ($\phi$) pivoting around the RCM, and stylus $Z$ displacement to the insertion depth ($r$). Flange rotation matrix $\mathbf{R}_{\text{ee}}$ is calculated dynamically to keep the tool shaft's approach vector (local Z-axis) pointing directly through $\mathbf{p}_{\text{rcm}}$.
+The node first creates a scaled Cartesian tool-tip target from haptic position alone:
+
+$$\mathbf{p}_{\text{tip,free}}=\mathbf{p}_{\text{tip},0}+s\,{}^r\!\mathbf{R}_h(\mathbf{p}_h-\mathbf{p}_{h,0}).$$
+
+It projects that point into the permitted trocar cone and insertion interval. For the projected point, $r=\|\mathbf{p}_{\text{rcm}}-\mathbf{p}_{\text{tip}}\|$ and $\mathbf{u}=(\mathbf{p}_{\text{rcm}}-\mathbf{p}_{\text{tip}})/r$. The flange target is then $\mathbf{p}_{\text{ee}}=\mathbf{p}_{\text{rcm}}+(L_{\text{tool}}-r)\mathbf{u}$ and its local $+Z$ axis is constrained to $-\mathbf{u}$. Haptic orientation never enters this calculation; the clutch-time axial roll is preserved because RCM geometry itself leaves roll underdetermined.
 
 ---
 
@@ -79,10 +83,9 @@ All parameters are configured in [config/teleop_params.yaml](file:///home/tbs-pa
 | `robot_base_frame` | `string` | `"fr3_link0"` | TF frame ID representing the base of the Franka robot. |
 | `robot_ee_frame` | `string` | `"fr3_link8"` | Franka flange TF frame. The Franka Hand is not loaded. |
 | `robot_tool_tip_frame` | `string` | `"biorob_tool_tip"` | Explicit tool-tip TF captured when registering the trocar center. |
-| `k_theta` | `double` | `2.0` | Scaling factor mapping haptic stylus lateral offset to azimuth angle ($\theta$). |
-| `k_phi` | `double` | `2.0` | Scaling factor mapping haptic stylus vertical offset to elevation angle ($\phi$). |
-| `k_r` | `double` | `0.5` | Scaling factor mapping haptic stylus depth offset to tool insertion depth ($r$). |
-| `k_roll` | `double` | `1.0` | Scaling factor for the surgical tool's wrist roll rotation. |
+| `tip_position_scale` | `double` | `0.2` | Cartesian haptic-position to tool-tip-position scale; 10 mm hand motion requests 2 mm tip motion before RCM projection. |
+| `max_tilt_angle` | `double` | `0.52` | Maximum tool-shaft tilt from robot-base $+Z$ in radians (approximately $30^\circ$). |
+| `tip_direction_transition_depth` | `double` | `0.02` | Insertion over which the projected shaft direction blends from its clutch-time direction, preventing tilt or azimuth steps at zero insertion. |
 | `deadband_position` | `double` | `0.0005` | Position deadband in meters ($0.5$ mm) to ignore minor stylus movements/tremor. |
 | `cutoff_freq` | `double` | `5.0` | Cutoff frequency (Hz) for the Butterworth low-pass filter to suppress user hand tremor. |
 | `rcm_x` | `double` | `0.4` | Initial $X$ coordinate of the RCM point in the robot base frame (meters). |
@@ -97,7 +100,6 @@ All parameters are configured in [config/teleop_params.yaml](file:///home/tbs-pa
 | `custom_tool_state_topic` | `string` | `"~/custom_tool_closed"` | Placeholder custom-tool output; `false=open`, `true=closed`. |
 | `use_rcm` | `bool` | `true` | Enables Remote Center of Motion constraints when true. If false, maps inputs directly to Cartesian coordinates. |
 | `k_linear` | `double` | `0.2` | Scaling factor for direct Cartesian translation (only used when `use_rcm` is false). |
-| `k_rotation` | `double` | `0.3` | Scaling factor for direct Cartesian orientation (only used when `use_rcm` is false). |
 | `robot_state_timeout` | `double` | `0.10` | Maximum accepted robot TF and direct joint-state feedback age (seconds). |
 | `command_chain_timeout` | `double` | `0.25` | Maximum age of Servo output or arm-controller state before reporting a command-chain fault. |
 | `positioning_mode` | `string` | `"fixed"` | `fixed`, haptic-driven `haptic_jog`, or optional `physical_guiding`. Both top-level RCM launch files select `haptic_jog`. |

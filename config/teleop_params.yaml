@@ -6,10 +6,11 @@
     robot_base_frame: "fr3_link0"
     robot_ee_frame: "fr3_link8"
     robot_tool_tip_frame: "biorob_tool_tip"
-    k_theta: 2.0
-    k_phi: 2.0
-    k_r: 0.5
-    k_roll: -1.0
+    # Position-only Cartesian haptic-to-tool-tip mapping. Haptic orientation is ignored.
+    tip_position_scale: 0.2
+    max_tilt_angle: 0.52
+    # Blend shaft direction over the first 20 mm to avoid an orientation step at r=0.
+    tip_direction_transition_depth: 0.02
     deadband_position: 0.0005
     cutoff_freq: 5.0
     rcm_x: 0.4
@@ -26,7 +27,6 @@
     custom_tool_state_topic: "/phantom_panda_teleop_node/custom_tool_closed"
     use_rcm: true
     k_linear: 0.2
-    k_rotation: 0.3
     robot_state_timeout: 0.10
     command_chain_timeout: 0.25
     joy_topic: "/geomagic_touch_x/joy"

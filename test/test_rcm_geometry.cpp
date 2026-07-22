@@ -7,6 +7,8 @@
 #include "phantom_panda_teleop/rcm_geometry.hpp"
 
 using phantom_panda_teleop::SphericalRcmState;
+using phantom_panda_teleop::blendShaftDirectionNearApex;
+using phantom_panda_teleop::cartesianTipTargetWithRcm;
 using phantom_panda_teleop::flangeTargetFromSpherical;
 using phantom_panda_teleop::pointToShaftLineDistance;
 using phantom_panda_teleop::shaftAxisFromAngles;
@@ -51,4 +53,77 @@ TEST(RcmGeometry, PointToLineDistanceMeasuresLateralMiss)
   const Eigen::Vector3d rcm(0.003, -0.004, 0.2);
 
   EXPECT_NEAR(pointToShaftLineDistance(rcm, origin, axis), 0.005, 1e-12);
+}
+
+TEST(RcmGeometry, FeasibleCartesianTipTargetIsPreserved)
+{
+  const Eigen::Vector3d rcm(0.4, 0.0, 0.2);
+  const Eigen::Vector3d desired_tip(0.38, 0.01, 0.12);
+  const auto target = cartesianTipTargetWithRcm(
+    desired_tip, rcm, Eigen::Vector3d::UnitZ(), 0.25, 0.0, 0.23, 0.52);
+
+  EXPECT_TRUE(target.tip_position.isApprox(desired_tip, 1e-12));
+  EXPECT_TRUE(
+    (target.flange_position + 0.25 * (-target.shaft_axis)).isApprox(
+      target.tip_position, 1e-12));
+  EXPECT_NEAR(
+    pointToShaftLineDistance(rcm, target.flange_position, -target.shaft_axis),
+    0.0, 1e-12);
+}
+
+TEST(RcmGeometry, CartesianTipTargetProjectsOntoTiltCone)
+{
+  const Eigen::Vector3d rcm = Eigen::Vector3d::Zero();
+  const auto target = cartesianTipTargetWithRcm(
+    Eigen::Vector3d(-0.10, 0.0, -0.01), rcm, Eigen::Vector3d::UnitZ(),
+    0.25, 0.0, 0.23, 0.52);
+
+  const double tilt = std::acos(std::clamp(target.shaft_axis.z(), -1.0, 1.0));
+  EXPECT_NEAR(tilt, 0.52, 1e-12);
+  EXPECT_NEAR(
+    pointToShaftLineDistance(rcm, target.flange_position, -target.shaft_axis),
+    0.0, 1e-12);
+}
+
+TEST(RcmGeometry, CartesianTargetAboveTrocarProjectsToApexWithoutAxisFlip)
+{
+  const Eigen::Vector3d rcm(0.4, 0.0, 0.2);
+  const Eigen::Vector3d fallback =
+    phantom_panda_teleop::shaftAxisFromAngles(0.3, 0.2);
+  const auto target = cartesianTipTargetWithRcm(
+    rcm + Eigen::Vector3d(0.0, 0.0, 0.05), rcm, fallback,
+    0.25, 0.0, 0.23, 0.52);
+
+  EXPECT_NEAR(target.insertion, 0.0, 1e-12);
+  EXPECT_TRUE(target.tip_position.isApprox(rcm, 1e-12));
+  EXPECT_TRUE(target.shaft_axis.isApprox(fallback.normalized(), 1e-12));
+}
+
+TEST(RcmGeometry, CartesianTipTargetClampsMaximumInsertion)
+{
+  const Eigen::Vector3d rcm = Eigen::Vector3d::Zero();
+  const auto target = cartesianTipTargetWithRcm(
+    Eigen::Vector3d(0.0, 0.0, -1.0), rcm, Eigen::Vector3d::UnitZ(),
+    0.25, 0.0, 0.23, 0.52);
+
+  EXPECT_NEAR(target.insertion, 0.23, 1e-12);
+  EXPECT_TRUE(target.tip_position.isApprox(Eigen::Vector3d(0.0, 0.0, -0.23), 1e-12));
+  EXPECT_TRUE(target.flange_position.isApprox(Eigen::Vector3d(0.0, 0.0, 0.02), 1e-12));
+}
+
+TEST(RcmGeometry, ShaftDirectionTransitionsContinuouslyFromApex)
+{
+  const Eigen::Vector3d start = Eigen::Vector3d::UnitZ();
+  const Eigen::Vector3d target =
+    phantom_panda_teleop::shaftAxisFromAngles(0.4, 0.5);
+
+  const Eigen::Vector3d at_apex = blendShaftDirectionNearApex(start, target, 0.0, 0.02);
+  const Eigen::Vector3d halfway = blendShaftDirectionNearApex(start, target, 0.01, 0.02);
+  const Eigen::Vector3d after_transition =
+    blendShaftDirectionNearApex(start, target, 0.03, 0.02);
+
+  EXPECT_TRUE(at_apex.isApprox(start, 1e-12));
+  EXPECT_GT(halfway.dot(start), target.dot(start));
+  EXPECT_GT(halfway.dot(target), start.dot(target));
+  EXPECT_TRUE(after_transition.isApprox(target, 1e-12));
 }

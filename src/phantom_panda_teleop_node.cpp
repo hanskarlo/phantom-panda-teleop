@@ -129,10 +129,9 @@ public:
     this->declare_parameter("robot_base_frame", "fr3_link0");
     this->declare_parameter("robot_ee_frame", "fr3_link8");
     this->declare_parameter("robot_tool_tip_frame", "biorob_tool_tip");
-    this->declare_parameter("k_theta", 2.0); // scale factor for azimuth
-    this->declare_parameter("k_phi", 2.0);   // scale factor for elevation
-    this->declare_parameter("k_r", 0.5);     // scale factor for insertion depth
-    this->declare_parameter("k_roll", 1.0);  // scale factor for wrist roll
+    this->declare_parameter("tip_position_scale", 0.2); // haptic-to-tip Cartesian scale
+    this->declare_parameter("max_tilt_angle", 0.52); // maximum shaft tilt from base +Z
+    this->declare_parameter("tip_direction_transition_depth", 0.02);
     this->declare_parameter("deadband_position", 0.0005); // 0.5 mm deadband
     this->declare_parameter("cutoff_freq", 5.0); // 5 Hz tremor low-pass cutoff
     this->declare_parameter("rcm_x", 0.4);
@@ -147,7 +146,6 @@ public:
     this->declare_parameter("custom_tool_state_topic", "~/custom_tool_closed");
     this->declare_parameter("use_rcm", true);
     this->declare_parameter("k_linear", 0.2);
-    this->declare_parameter("k_rotation", 0.3);
     this->declare_parameter("haptic_timeout", 0.05); // 50 ms timeout
     this->declare_parameter("robot_state_timeout", 0.10);
     this->declare_parameter("command_chain_timeout", 0.25);
@@ -187,10 +185,9 @@ public:
     this->get_parameter("robot_base_frame", robot_base_frame_);
     this->get_parameter("robot_ee_frame", robot_ee_frame_);
     this->get_parameter("robot_tool_tip_frame", robot_tool_tip_frame_);
-    this->get_parameter("k_theta", k_theta_);
-    this->get_parameter("k_phi", k_phi_);
-    this->get_parameter("k_r", k_r_);
-    this->get_parameter("k_roll", k_roll_);
+    this->get_parameter("tip_position_scale", tip_position_scale_);
+    this->get_parameter("max_tilt_angle", max_tilt_angle_);
+    this->get_parameter("tip_direction_transition_depth", tip_direction_transition_depth_);
     this->get_parameter("deadband_position", deadband_position_);
     this->get_parameter("cutoff_freq", cutoff_freq_);
     this->get_parameter("tool_length", tool_length_);
@@ -202,7 +199,6 @@ public:
     this->get_parameter("custom_tool_state_topic", custom_tool_state_topic_);
     this->get_parameter("use_rcm", use_rcm_);
     this->get_parameter("k_linear", k_linear_);
-    this->get_parameter("k_rotation", k_rotation_);
     this->get_parameter("haptic_timeout", haptic_timeout_);
     this->get_parameter("robot_state_timeout", robot_state_timeout_);
     this->get_parameter("command_chain_timeout", command_chain_timeout_);
@@ -237,11 +233,14 @@ public:
     {
       throw std::invalid_argument("Update rate and Cartesian motion limits must all be positive.");
     }
-    if (k_linear_ < 0.0 || k_rotation_ < 0.0 || k_rotation_ > 1.0 ||
+    if (tip_position_scale_ < 0.0 || k_linear_ < 0.0 ||
+      max_tilt_angle_ < 0.0 || max_tilt_angle_ >= M_PI_2 ||
+      tip_direction_transition_depth_ <= 0.0 ||
       haptic_timeout_ <= 0.0 || robot_state_timeout_ <= 0.0 || command_chain_timeout_ <= 0.0)
     {
       throw std::invalid_argument(
-              "Mapping scales must be nonnegative, k_rotation must not exceed 1, and timeouts must be positive.");
+              "Position scales must be nonnegative, max_tilt_angle must be in [0, pi/2), "
+              "and transition depth/timeouts must be positive.");
     }
     if (joint_velocity_halt_limits_.size() != 7 ||
       std::any_of(
@@ -363,8 +362,6 @@ public:
     servo_started_ = false;
     servo_start_request_pending_ = false;
     command_limiter_initialized_ = false;
-    last_roll_raw_ = 0.0;
-    accumulated_roll_ = 0.0;
     have_recent_joint_state_ = false;
     have_servo_joint_command_ = false;
     have_controller_state_ = false;
@@ -1025,14 +1022,6 @@ private:
       haptic_tf.transform.translation.z
     );
 
-    haptic_start_rot_ = Eigen::Quaterniond(
-      haptic_tf.transform.rotation.w,
-      haptic_tf.transform.rotation.x,
-      haptic_tf.transform.rotation.y,
-      haptic_tf.transform.rotation.z
-    );
-    haptic_start_rot_.normalize();
-
     // Register initial robot state
     robot_start_pos_ = Eigen::Vector3d(
       robot_tf.transform.translation.x,
@@ -1058,27 +1047,31 @@ private:
 
       const auto start_state = phantom_panda_teleop::sphericalStateFromFlange(
         robot_start_pos_, rcm_position_, tool_length_);
-      theta_start_ = start_state.theta;
-      phi_start_ = start_state.phi;
-      r_start_ = start_state.insertion;
-      if (std::abs(r_start_) < 1e-6) {
-        r_start_ = 0.0; // remove registration/TF roundoff at the tool-tip boundary
+      double start_insertion = start_state.insertion;
+      if (std::abs(start_insertion) < 1e-6) {
+        start_insertion = 0.0; // remove registration/TF roundoff at the tool-tip boundary
       }
       const Eigen::Vector3d u_start = (robot_start_pos_ - rcm_position_).normalized();
 
-      if (r_start_ < min_insertion_depth_ || r_start_ > max_insertion_depth_) {
+      if (start_insertion < min_insertion_depth_ || start_insertion > max_insertion_depth_) {
         RCLCPP_ERROR(
           this->get_logger(),
           "Initial insertion %.3f m is outside configured limits [%.3f, %.3f] m.",
-          r_start_, min_insertion_depth_, max_insertion_depth_);
+          start_insertion, min_insertion_depth_, max_insertion_depth_);
         return false;
       }
-      if (phi_start_ > 0.52) {
+      if (start_state.phi > max_tilt_angle_) {
         RCLCPP_ERROR(
           this->get_logger(), "Robot is tilted too far from RCM constraint (phi = %.2f rad). Please reposition.",
-          phi_start_);
+          start_state.phi);
         return false;
       }
+
+      // The haptic controls only the Cartesian tool-tip position. Preserve the current
+      // ideal tip as the clutch-relative origin and retain the shaft direction for the
+      // zero-insertion case, where a point at the RCM cannot define an orientation.
+      rcm_start_shaft_axis_ = u_start;
+      robot_start_tip_pos_ = rcm_position_ - start_insertion * u_start;
 
       // Preserve the measured starting orientation and transport its tool axis continuously.
       // This avoids the cross-product pole singularity that occurs when the tool is vertical.
@@ -1096,8 +1089,11 @@ private:
 
       // Log tracking target info
       RCLCPP_INFO(
-        this->get_logger(), "Teleop values locked (RCM active): theta0=%.2f deg, phi0=%.2f deg, r0=%.3f m",
-        theta_start_ * 180.0 / M_PI, phi_start_ * 180.0 / M_PI, r_start_);
+        this->get_logger(),
+        "Cartesian tip mapping locked (RCM active): tip0=[%.3f, %.3f, %.3f], "
+        "insertion0=%.3f m, scale=%.3f",
+        robot_start_tip_pos_.x(), robot_start_tip_pos_.y(), robot_start_tip_pos_.z(),
+        start_insertion, tip_position_scale_);
     } else {
       RCLCPP_INFO(
         this->get_logger(),
@@ -1110,9 +1106,6 @@ private:
     twist_linear_filter_.reset();
     twist_angular_filter_.reset();
     reset_command_limiter();
-    last_roll_raw_ = 0.0;
-    accumulated_roll_ = 0.0;
-
     // Call service to maximize collision thresholds if configured
     if (maximize_collision_thresholds_) {
       maximize_collision_thresholds();
@@ -1578,13 +1571,6 @@ private:
       haptic_tf.transform.translation.z
     );
 
-    Eigen::Quaterniond haptic_rot(
-      haptic_tf.transform.rotation.w,
-      haptic_tf.transform.rotation.x,
-      haptic_tf.transform.rotation.y,
-      haptic_tf.transform.rotation.z
-    );
-
     Eigen::Vector3d p_curr(
       robot_tf.transform.translation.x,
       robot_tf.transform.translation.y,
@@ -1620,82 +1606,52 @@ private:
     Eigen::Quaterniond cmd_q;
 
     if (enforce_rcm && use_rcm_) {
-      // 4. Map displacements to Spherical Coordinates pivoting about registered trocar
-      double theta = theta_start_ + k_theta_ * mapped_disp.y(); // Left/Right displacement maps to azimuth
-      double phi = phi_start_ - k_phi_ * mapped_disp.z();     // Up/Down displacement maps to elevation
-      double r = r_start_ + k_r_ * mapped_disp.x();         // Forward/Backward displacement maps to depth
-
-      // Safety limits for trocar angles and insertion depths
-      phi = std::clamp(phi, 0.0, 0.52); // Max 30 deg tilt to protect port boundaries
-      r = std::clamp(r, min_insertion_depth_, max_insertion_depth_);
-
-      // 5. Reconstruct tool axis vector pointing from RCM towards end-effector
-      const phantom_panda_teleop::SphericalRcmState target_state{theta, phi, r};
-      const Eigen::Vector3d u = phantom_panda_teleop::shaftAxisFromAngles(theta, phi);
-
-      // 6. Compute new Cartesian target for the robot end-effector flange
-      cmd_pos = phantom_panda_teleop::flangeTargetFromSpherical(
-        rcm_position_, tool_length_, target_state);
-
-      // 7. Transport the measured starting orientation to the new shaft direction.
-      // Eigen's shortest-arc vector rotation remains continuous at the old vertical-axis pole.
-      Eigen::Vector3d z_ee = -u; // Point along the shaft from EE to Trocar
-
-      // 8. Extract and unwrap the twist component about the stylus' initial local Z axis.
-      // This avoids a +pi/-pi target jump during continuous wrist roll.
-      haptic_rot.normalize();
-      Eigen::Quaterniond relative_haptic = haptic_start_rot_.conjugate() * haptic_rot;
-      relative_haptic.normalize();
-      Eigen::Quaterniond roll_twist(relative_haptic.w(), 0.0, 0.0, relative_haptic.z());
-      double raw_roll = 0.0;
-      if (roll_twist.norm() > 1e-9) {
-        roll_twist.normalize();
-        raw_roll = 2.0 * std::atan2(roll_twist.z(), roll_twist.w());
-        raw_roll = std::remainder(raw_roll, 2.0 * M_PI);
+      // 4. Command a scaled Cartesian tool-tip displacement. Haptic orientation is
+      // deliberately ignored; only the clutch-relative haptic position is used.
+      const Eigen::Vector3d desired_tip =
+        robot_start_tip_pos_ + tip_position_scale_ * mapped_disp;
+      if (!desired_tip.allFinite()) {
+        RCLCPP_ERROR(
+          this->get_logger(), "SAFETY HALT: Non-finite Cartesian tip target detected.");
+        state_ = TeleopState::SAFETY_HALT;
+        reset_command_limiter();
+        publish_zero_velocity();
+        return;
       }
-      const double roll_delta = std::remainder(raw_roll - last_roll_raw_, 2.0 * M_PI);
-      accumulated_roll_ += roll_delta;
-      last_roll_raw_ = raw_roll;
 
-      const double cmd_roll = k_roll_ * accumulated_roll_;
+      // 5. Project the free Cartesian tip target into the permitted trocar cone and
+      // insertion interval, then reconstruct the unique RCM-valid flange position.
+      auto target = phantom_panda_teleop::cartesianTipTargetWithRcm(
+        desired_tip, rcm_position_, rcm_start_shaft_axis_, tool_length_,
+        min_insertion_depth_, max_insertion_depth_, max_tilt_angle_);
+
+      // A point at the RCM has no direction. Blend the complete shaft direction away
+      // from the clutch-time axis near the cone apex so neither tilt nor azimuth can
+      // jump for an arbitrarily small lateral hand displacement.
+      const Eigen::Vector3d blended_axis =
+        phantom_panda_teleop::blendShaftDirectionNearApex(
+        rcm_start_shaft_axis_, target.shaft_axis, target.insertion,
+        tip_direction_transition_depth_);
+      target.shaft_axis = blended_axis;
+      target.tip_position = rcm_position_ - target.insertion * blended_axis;
+      target.flange_position =
+        rcm_position_ + (tool_length_ - target.insertion) * blended_axis;
+      cmd_pos = target.flange_position;
+
+      // 6. The RCM geometry determines the tool axis. Axial roll is not observable from
+      // a point target, so preserve the roll present when the clutch was engaged.
+      const Eigen::Vector3d z_ee = -target.shaft_axis;
       const Eigen::Quaterniond shaft_alignment =
         Eigen::Quaterniond::FromTwoVectors(rcm_start_z_axis_, z_ee);
-      const Eigen::Quaterniond transported_start = shaft_alignment * robot_start_rot_;
-      Eigen::AngleAxisd roll_rot(cmd_roll, z_ee);
-      cmd_q = Eigen::Quaterniond(roll_rot) * transported_start;
+      cmd_q = shaft_alignment * robot_start_rot_;
       cmd_q.normalize();
     } else {
-      // Direct Cartesian mapping with scaling factor k_linear_
+      // Position-only direct Cartesian mapping. Haptic orientation is intentionally ignored.
       cmd_pos = robot_start_pos_ + k_linear_ * mapped_disp;
-
-      // Calculate the shortest relative stylus rotation and scale it for direct teleoperation.
-      // A reduced orientation scale avoids demanding large wrist motion from a small hand rotation.
-      haptic_rot.normalize();
-      Eigen::Quaterniond rel_rot_global = haptic_rot * haptic_start_rot_.conjugate();
-      rel_rot_global.normalize();
-      if (rel_rot_global.w() < 0.0) {
-        rel_rot_global.coeffs() *= -1.0;
-      }
-      Eigen::Quaterniond scaled_rel_rot = Eigen::Quaterniond::Identity();
-      const Eigen::Vector3d rel_vector(
-        rel_rot_global.x(), rel_rot_global.y(), rel_rot_global.z());
-      const double rel_vector_norm = rel_vector.norm();
-      if (rel_vector_norm > 1e-9) {
-        const double rel_angle = 2.0 * std::atan2(rel_vector_norm, rel_rot_global.w());
-        scaled_rel_rot = Eigen::Quaterniond(
-          Eigen::AngleAxisd(k_rotation_ * rel_angle, rel_vector / rel_vector_norm));
-      }
-      Eigen::Quaterniond q_h_r(R_h_r_);
-
-      // Transform this global rotation to the robot's base frame
-      Eigen::Quaterniond rel_rot_robot_global = q_h_r * scaled_rel_rot * q_h_r.conjugate();
-
-      // Apply the global rotation to the robot's starting orientation
-      cmd_q = rel_rot_robot_global * robot_start_rot_;
-      cmd_q.normalize();
+      cmd_q = robot_start_rot_;
     }
 
-    // 9. Closed-loop Proportional Controller to generate TwistStamped velocity commands
+    // 7. Closed-loop Proportional Controller to generate TwistStamped velocity commands
     if (!cmd_pos.allFinite() || !cmd_q.coeffs().allFinite() ||
       !p_curr.allFinite() || !q_curr.coeffs().allFinite())
     {
@@ -1800,7 +1756,7 @@ private:
       "Tracking | P_err: [%.3f, %.3f, %.3f], R_err: [%.3f, %.3f, %.3f]",
       p_err.x(), p_err.y(), p_err.z(), rot_err.x(), rot_err.y(), rot_err.z());
 
-    // 10. Publish TwistStamped to MoveIt Servo
+    // 8. Publish TwistStamped to MoveIt Servo
     geometry_msgs::msg::TwistStamped twist_msg;
     twist_msg.header.stamp = this->get_clock()->now();
     twist_msg.header.frame_id = robot_base_frame_;
@@ -1820,7 +1776,9 @@ private:
   std::string robot_base_frame_;
   std::string robot_ee_frame_;
   std::string robot_tool_tip_frame_;
-  double k_theta_, k_phi_, k_r_, k_roll_;
+  double tip_position_scale_;
+  double max_tilt_angle_;
+  double tip_direction_transition_depth_;
   double deadband_position_;
   double cutoff_freq_;
   double tool_length_;
@@ -1848,19 +1806,16 @@ private:
 
   // Clutch start offsets
   Eigen::Vector3d haptic_start_pos_;
-  Eigen::Quaterniond haptic_start_rot_;
-  double theta_start_, phi_start_, r_start_;
 
   // Direct Cartesian tracking start offsets
   Eigen::Vector3d robot_start_pos_;
+  Eigen::Vector3d robot_start_tip_pos_;
   Eigen::Quaterniond robot_start_rot_;
   Eigen::Vector3d rcm_start_z_axis_;
-  double last_roll_raw_;
-  double accumulated_roll_;
+  Eigen::Vector3d rcm_start_shaft_axis_;
   bool use_rcm_;
   bool rcm_registered_;
   double k_linear_;
-  double k_rotation_;
   double haptic_timeout_;
   double robot_state_timeout_;
   double command_chain_timeout_;
