@@ -1,33 +1,98 @@
 <?xml version='1.0' encoding='utf-8'?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="fr3">
 
-  <!-- Include the original FR3 robot description from franka_description package -->
-  <xacro:include filename="$(find franka_description)/robots/fr3/fr3.urdf.xacro"/>
-
-  <!-- Placeholder for BioRob 2026 Custom End-Effector / Trocar Tool -->
-  <!-- Once the physical tool design is finalized, uncomment and modify this block -->
   <!--
-  <link name="biorob_custom_tool">
+    Instantiate the standard FR3 model without its ros2_control block, then add
+    the local block below. The local fake-hardware declaration enables velocity
+    integration; the physical-hardware declaration remains equivalent to the
+    upstream Franka description.
+  -->
+  <xacro:include filename="$(find franka_description)/robots/common/franka_robot.xacro"/>
+  <xacro:include filename="biorob_franka_arm.ros2_control.xacro"/>
+
+  <xacro:arg name="hand" default="false"/>
+  <xacro:arg name="ee_id" default="none"/>
+  <xacro:arg name="robot_ip" default=""/>
+  <xacro:arg name="use_fake_hardware" default="false"/>
+  <xacro:arg name="fake_sensor_commands" default="false"/>
+  <xacro:arg name="ros2_control" default="false"/>
+
+  <xacro:franka_robot
+    arm_id="fr3"
+    joint_limits="${xacro.load_yaml('$(find franka_description)/robots/fr3/joint_limits.yaml')}"
+    inertials="${xacro.load_yaml('$(find franka_description)/robots/fr3/inertials.yaml')}"
+    kinematics="${xacro.load_yaml('$(find franka_description)/robots/fr3/kinematics.yaml')}"
+    accelerometer_config="${xacro.load_yaml('$(find franka_description)/robots/fr3/accelerometers.yaml')}"
+    dynamics="${xacro.load_yaml('$(find franka_description)/robots/fr3/dynamics.yaml')}"
+    hand="$(arg hand)"
+    ee_id="$(arg ee_id)"
+    ros2_control="false"
+    no_prefix="false"
+    connected_to="base"/>
+
+  <xacro:if value="$(arg ros2_control)">
+    <xacro:biorob_franka_arm_ros2_control
+      arm_id="fr3"
+      robot_ip="$(arg robot_ip)"
+      use_fake_hardware="$(arg use_fake_hardware)"
+      fake_sensor_commands="$(arg fake_sensor_commands)"/>
+  </xacro:if>
+
+  <!--
+    Placeholder for the BioRob tool. It attaches directly to fr3_link8, the flange
+    center frame, because the Franka Hand is intentionally not loaded. Keep
+    tool_length synchronized with teleop_params.yaml.
+  -->
+  <xacro:property name="biorob_tool_length" value="0.25"/>
+  <xacro:property name="biorob_shaft_radius" value="0.003"/>
+  <xacro:property name="biorob_tip_radius" value="0.004"/>
+  <xacro:property name="biorob_shaft_collision_length"
+                  value="${biorob_tool_length - biorob_tip_radius - 0.001}"/>
+
+  <link name="biorob_tool_shaft">
     <visual>
-      <origin xyz="0 0 0.125" rpy="0 0 0"/>
+      <origin xyz="0 0 ${biorob_tool_length / 2.0}" rpy="0 0 0"/>
       <geometry>
-        <cylinder length="0.25" radius="0.005"/>
+        <cylinder length="${biorob_tool_length}" radius="${biorob_shaft_radius}"/>
       </geometry>
-      <material name="silver">
-        <color rgba="0.8 0.8 0.8 1.0"/>
+      <material name="biorob_shaft_silver">
+        <color rgba="0.72 0.76 0.80 1.0"/>
       </material>
     </visual>
     <collision>
-      <origin xyz="0 0 0.125" rpy="0 0 0"/>
+      <!-- Leave a 1 mm collision gap before the tip sphere to avoid self-contact. -->
+      <origin xyz="0 0 ${biorob_shaft_collision_length / 2.0}" rpy="0 0 0"/>
       <geometry>
-        <cylinder length="0.25" radius="0.005"/>
+        <cylinder length="${biorob_shaft_collision_length}" radius="${biorob_shaft_radius}"/>
       </geometry>
     </collision>
   </link>
-  <joint name="biorob_tool_joint" type="fixed">
-    <parent link="fr3_hand"/>
-    <child link="biorob_custom_tool"/>
+
+  <joint name="biorob_tool_shaft_joint" type="fixed">
+    <parent link="fr3_link8"/>
+    <child link="biorob_tool_shaft"/>
     <origin xyz="0 0 0.0" rpy="0 0 0"/>
   </joint>
-  -->
+
+  <link name="biorob_tool_tip">
+    <visual>
+      <geometry>
+        <sphere radius="${biorob_tip_radius}"/>
+      </geometry>
+      <material name="biorob_tip_red">
+        <color rgba="0.9 0.12 0.08 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <sphere radius="${biorob_tip_radius}"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="biorob_tool_tip_joint" type="fixed">
+    <parent link="biorob_tool_shaft"/>
+    <child link="biorob_tool_tip"/>
+    <origin xyz="0 0 ${biorob_tool_length}" rpy="0 0 0"/>
+  </joint>
 </robot>

@@ -1,0 +1,28 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="fr3">
+
+  <!-- Reuse the standard FR3 groups, virtual joint, and allowed-collision matrix. -->
+  <xacro:include filename="$(find franka_description)/robots/fr3/fr3.srdf.xacro"/>
+
+  <!--
+    These fixed-link pairs are intentionally adjacent in the BioRob tool model.
+    Keep all other tool/robot and tool/scene collision checks enabled.
+  -->
+  <!--
+    fr3_link8 is a collisionless flange frame. The shaft is therefore also
+    physically adjacent to the fr3_link7 wrist collision mesh behind it.
+  -->
+  <disable_collisions
+    link1="fr3_link7"
+    link2="biorob_tool_shaft"
+    reason="Adjacent"/>
+  <disable_collisions
+    link1="fr3_link8"
+    link2="biorob_tool_shaft"
+    reason="Adjacent"/>
+  <disable_collisions
+    link1="biorob_tool_shaft"
+    link2="biorob_tool_tip"
+    reason="Adjacent"/>
+
+</robot>
