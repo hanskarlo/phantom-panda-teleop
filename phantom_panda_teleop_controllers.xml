@@ -1,0 +1,10 @@
+<library path="realtime_servo_velocity_controller">
+  <class
+    name="phantom_panda_teleop/RealtimeServoVelocityController"
+    type="phantom_panda_teleop::RealtimeServoVelocityController"
+    base_class_type="controller_interface::ControllerInterface">
+    <description>
+      A 1 kHz acceleration- and jerk-limited joint velocity controller for Franka Servo teleoperation.
+    </description>
+  </class>
+</library>

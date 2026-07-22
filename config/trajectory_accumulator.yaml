@@ -1,0 +1,14 @@
+/servo_trajectory_accumulator:
+  ros__parameters:
+    input_topic: "/servo_node/joint_trajectory_raw"
+    output_topic: "/fr3_arm_controller/joint_trajectory"
+    controller_state_topic: "/fr3_arm_controller/controller_state"
+    publish_rate: 100.0
+    input_timeout: 0.05
+    controller_state_timeout: 0.10
+    # Coarse 100 Hz limits for Servo input. The arm controller repeats the final
+    # acceleration/jerk limiting in its 1 kHz real-time update loop; that second
+    # stage is what makes each Franka hardware command continuous.
+    max_joint_velocity: [0.20, 0.20, 0.20, 0.20, 0.30, 0.30, 0.30]
+    max_joint_acceleration: [0.50, 0.50, 0.50, 0.50, 1.00, 1.00, 1.00]
+    max_joint_jerk: [5.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0]

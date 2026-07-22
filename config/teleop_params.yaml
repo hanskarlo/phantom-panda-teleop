@@ -4,7 +4,8 @@
     haptic_base_frame: "touch_x_base"
     haptic_ee_frame: "touch_x_ee"
     robot_base_frame: "fr3_link0"
-    robot_ee_frame: "fr3_hand"
+    robot_ee_frame: "fr3_link8"
+    robot_tool_tip_frame: "biorob_tool_tip"
     k_theta: 2.0
     k_phi: 2.0
     k_r: 0.5
@@ -15,14 +16,44 @@
     rcm_y: 0.0
     rcm_z: 0.2
     tool_length: 0.25
-    gripper_action_name: "/franka_gripper/gripper_action"
-    gripper_open_width: 0.08
-    gripper_close_width: 0.00
-    gripper_force: 10.0
+    min_insertion_depth: 0.0
+    max_insertion_depth: 0.23
+    # Trocar aperture is a 30 mm circle in a plane parallel to link0 XY.
+    rcm_hole_diameter: 0.03
+    shaft_marker_extension: 0.15
+    rcm_warning_error: 0.002
+    # Placeholder output for the future custom tool: false=open, true=closed.
+    custom_tool_state_topic: "/phantom_panda_teleop_node/custom_tool_closed"
     use_rcm: true
     k_linear: 0.2
+    k_rotation: 0.3
+    robot_state_timeout: 0.10
+    command_chain_timeout: 0.25
+    joy_topic: "/geomagic_touch_x/joy"
+    joint_state_topic: "/franka/joint_states"
+    servo_twist_topic: "/servo_node/delta_twist_cmds"
+    servo_status_topic: "/servo_node/status"
+    servo_start_service: "/servo_node/start_servo"
+    servo_joint_command_topic: "/servo_node/joint_trajectory_raw"
+    controller_state_topic: "/fr3_arm_controller/controller_state"
+    # Registration positioning is selected by the top-level launch file.
+    # fixed: capture current pose; haptic_jog: slow free Cartesian positioning;
+    # physical_guiding: optional controller release/restore fallback.
+    positioning_mode: "fixed"
+    controller_switch_service: "/controller_manager/switch_controller"
+    arm_controller_name: "fr3_arm_controller"
+    positioning_max_linear_vel: 0.01
+    positioning_max_angular_vel: 0.05
+    registration_joint_velocity_tolerance: 0.01
+    registration_settle_time: 0.5
+    # Independent measured-speed guard above the velocity bridge's command limits.
+    joint_velocity_halt_limits: [0.22, 0.22, 0.22, 0.22, 0.33, 0.33, 0.33]
     kp_pos: 3.5
     kp_rot: 2.5
     max_linear_vel: 0.05
     max_angular_vel: 0.2
-    maximize_collision_thresholds: true
+    max_linear_accel: 0.15
+    max_angular_accel: 0.6
+    max_linear_jerk: 1.0
+    max_angular_jerk: 4.0
+    maximize_collision_thresholds: false

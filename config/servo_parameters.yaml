@@ -11,12 +11,11 @@ scale:
   joint: 0.05
 
 # Motion filtering / smoothing
-use_smoothing: true
 smoothing_filter_plugin_name: "online_signal_smoothing::ButterworthFilterPlugin"
-low_pass_filter_coeff: 2.0
 
 ## Properties of outgoing joint commands
 publish_period: 0.01  # 100 Hz publication loop
+low_latency_mode: false
 command_out_type: trajectory_msgs/JointTrajectory
 publish_joint_positions: true
 publish_joint_velocities: true
@@ -29,17 +28,26 @@ move_group_name: fr3_arm
 planning_frame: fr3_link0
 
 # Frame of the robot end-effector
-ee_frame_name: fr3_hand
-robot_link_command_frame: fr3_hand
+ee_frame_name: fr3_link8
+robot_link_command_frame: fr3_link0
 
 # Input/Output topic names
 cartesian_command_in_topic: ~/delta_twist_cmds  # Resolves to /servo_node/delta_twist_cmds
-joint_topic: /joint_states
+joint_topic: /joint_states  # Complete seven-joint arm state used by the planning scene
 status_topic: ~/status
-command_out_topic: /fr3_arm_controller/joint_trajectory
+# The velocity bridge extracts and rate-limits Servo's differential joint velocities
+# before they reach the real joint-velocity controller.
+command_out_topic: /servo_node/joint_trajectory_raw
 
 # Joint limit margins
-joint_limit_margin: 0.05
+incoming_command_timeout: 0.05
+num_outgoing_halt_msgs_to_publish: 10
+halt_all_joints_in_joint_mode: true
+halt_all_joints_in_cartesian_mode: true
+lower_singularity_threshold: 17.0
+hard_stop_singularity_threshold: 25.0
+leaving_singularity_threshold_multiplier: 2.0
+joint_limit_margin: 0.10
 
 ## Safety and Collision Checking
 check_collisions: true
