@@ -4,7 +4,7 @@
       update_rate: 1000  # Hz
 
       fr3_arm_controller:
-        type: joint_trajectory_controller/JointTrajectoryController
+        type: phantom_panda_teleop/RealtimeServoVelocityController
 
       joint_state_broadcaster:
         type: joint_state_broadcaster/JointStateBroadcaster
@@ -23,11 +23,6 @@
 /**: 
   fr3_arm_controller:
     ros__parameters:
-      command_interfaces:
-        - effort
-      state_interfaces:
-        - position
-        - velocity
       joints:
         - fr3_joint1
         - fr3_joint2
@@ -36,11 +31,12 @@
         - fr3_joint5
         - fr3_joint6
         - fr3_joint7
-      gains:
-        fr3_joint1: { p: 600., d: 30., i: 0., i_clamp: 1. }
-        fr3_joint2: { p: 600., d: 30., i: 0., i_clamp: 1. }
-        fr3_joint3: { p: 600., d: 30., i: 0., i_clamp: 1. }
-        fr3_joint4: { p: 600., d: 30., i: 0., i_clamp: 1. }
-        fr3_joint5: { p: 250., d: 10., i: 0., i_clamp: 1. }
-        fr3_joint6: { p: 150., d: 10., i: 0., i_clamp: 1. }
-        fr3_joint7: { p: 50., d: 5., i: 0., i_clamp: 1. }
+      # The Servo bridge publishes at 100 Hz, while Franka consumes velocity at
+      # 1 kHz. Apply the final limits in the real-time controller so each 1 ms
+      # hardware command is continuous; a message-level limiter alone produces
+      # a staircase that can trip libfranka's acceleration-discontinuity reflex.
+      command_timeout: 0.05
+      state_publish_rate: 50.0
+      max_joint_velocity: [0.20, 0.20, 0.20, 0.20, 0.30, 0.30, 0.30]
+      max_joint_acceleration: [0.50, 0.50, 0.50, 0.50, 1.00, 1.00, 1.00]
+      max_joint_jerk: [500.0, 500.0, 500.0, 500.0, 1000.0, 1000.0, 1000.0]
