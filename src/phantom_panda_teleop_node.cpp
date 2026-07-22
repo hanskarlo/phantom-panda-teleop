@@ -140,6 +140,7 @@ public:
     this->declare_parameter("tool_length", 0.25); // 25 cm tool length
     this->declare_parameter("min_insertion_depth", 0.0);
     this->declare_parameter("max_insertion_depth", 0.23);
+    this->declare_parameter("registration_insertion_depth", 0.08);
     this->declare_parameter("rcm_hole_diameter", 0.03);
     this->declare_parameter("shaft_marker_extension", 0.15);
     this->declare_parameter("rcm_warning_error", 0.002);
@@ -159,6 +160,8 @@ public:
     this->declare_parameter(
       "controller_state_topic", "/fr3_arm_controller/controller_state");
     this->declare_parameter("positioning_mode", "fixed");
+    this->declare_parameter("start_in_registration", false);
+    this->declare_parameter("auto_register_rcm", false);
     this->declare_parameter(
       "controller_switch_service", "/controller_manager/switch_controller");
     this->declare_parameter("arm_controller_name", "fr3_arm_controller");
@@ -193,6 +196,7 @@ public:
     this->get_parameter("tool_length", tool_length_);
     this->get_parameter("min_insertion_depth", min_insertion_depth_);
     this->get_parameter("max_insertion_depth", max_insertion_depth_);
+    this->get_parameter("registration_insertion_depth", registration_insertion_depth_);
     this->get_parameter("rcm_hole_diameter", rcm_hole_diameter_);
     this->get_parameter("shaft_marker_extension", shaft_marker_extension_);
     this->get_parameter("rcm_warning_error", rcm_warning_error_);
@@ -210,6 +214,8 @@ public:
     this->get_parameter("servo_joint_command_topic", servo_joint_command_topic_);
     this->get_parameter("controller_state_topic", controller_state_topic_);
     this->get_parameter("positioning_mode", positioning_mode_);
+    this->get_parameter("start_in_registration", start_in_registration_);
+    this->get_parameter("auto_register_rcm", auto_register_rcm_);
     this->get_parameter("controller_switch_service", controller_switch_service_);
     this->get_parameter("arm_controller_name", arm_controller_name_);
     this->get_parameter("positioning_max_linear_vel", positioning_max_linear_vel_);
@@ -254,6 +260,12 @@ public:
     {
       throw std::invalid_argument(
               "Insertion limits must satisfy 0 <= min_insertion_depth < max_insertion_depth < tool_length.");
+    }
+    if (registration_insertion_depth_ < min_insertion_depth_ ||
+      registration_insertion_depth_ > max_insertion_depth_)
+    {
+      throw std::invalid_argument(
+              "registration_insertion_depth must lie within the configured insertion limits.");
     }
     if (rcm_hole_diameter_ <= 0.0 || shaft_marker_extension_ < 0.0 ||
       rcm_warning_error_ < 0.0)
@@ -354,7 +366,8 @@ public:
         std::placeholders::_2));
 
     // Initialize state
-    state_ = TeleopState::HOMING;
+    state_ = use_rcm_ && start_in_registration_ ?
+      TeleopState::REGISTRATION : TeleopState::HOMING;
     homing_timer_ = 0.0;
     custom_tool_closed_ = false;
     prev_joy_button1_ = 0;
@@ -373,6 +386,7 @@ public:
     latest_joint_velocities_.fill(0.0);
     last_joint_motion_time_ = this->get_clock()->now();
     last_controller_switch_attempt_ = this->get_clock()->now();
+    last_auto_registration_attempt_ = this->get_clock()->now();
     max_controller_position_error_ = 0.0;
     max_controller_velocity_error_ = 0.0;
     publish_custom_tool_state();
@@ -391,7 +405,8 @@ public:
       std::bind(&PhantomPandaTeleopNode::publish_rcm_visualization, this));
 
     RCLCPP_INFO(
-      this->get_logger(), "BioRob teleop node initialized in HOMING mode. RCM Point: [%.3f, %.3f, %.3f]",
+      this->get_logger(), "BioRob teleop node initialized in %s mode. RCM Point: [%.3f, %.3f, %.3f]",
+      state_ == TeleopState::REGISTRATION ? "REGISTRATION" : "HOMING",
       rcm_position_.x(), rcm_position_.y(), rcm_position_.z());
     RCLCPP_INFO(
       this->get_logger(),
@@ -399,7 +414,10 @@ public:
       servo_twist_topic_.c_str(), servo_joint_command_topic_.c_str(),
       controller_state_topic_.c_str());
     RCLCPP_INFO(
-      this->get_logger(), "Registration positioning mode: %s", positioning_mode_.c_str());
+      this->get_logger(),
+      "Registration: positioning=%s, insertion marker=%.1f mm, automatic=%s",
+      positioning_mode_.c_str(), registration_insertion_depth_ * 1000.0,
+      auto_register_rcm_ ? "true" : "false");
   }
 
 private:
@@ -555,7 +573,8 @@ private:
       return;
     }
 
-    // Capture the explicit placeholder/physical tool-tip frame at the hole center.
+    // Capture the explicit tool-tip frame after the known shaft marker has been placed
+    // at the trocar. The tip is already registration_insertion_depth_ beyond the port.
     geometry_msgs::msg::TransformStamped robot_tf;
     geometry_msgs::msg::TransformStamped tool_tip_tf;
     try {
@@ -617,7 +636,8 @@ private:
       this->set_parameter(rclcpp::Parameter("tool_length", tool_length_));
     }
 
-    rcm_position_ = p_tip;
+    rcm_position_ = phantom_panda_teleop::rcmFromInsertedToolTip(
+      p_tip, z_ee, registration_insertion_depth_);
     rcm_registered_ = true;
     this->set_parameters(
     {
@@ -626,8 +646,10 @@ private:
       rclcpp::Parameter("rcm_z", rcm_position_.z())});
 
     RCLCPP_INFO(
-      this->get_logger(), "Registered RCM trocar center at: [%.3f, %.3f, %.3f]",
-      rcm_position_.x(), rcm_position_.y(), rcm_position_.z());
+      this->get_logger(),
+      "Registered RCM trocar center at [%.3f, %.3f, %.3f] from %.1f mm insertion marker.",
+      rcm_position_.x(), rcm_position_.y(), rcm_position_.z(),
+      registration_insertion_depth_ * 1000.0);
 
     if (positioning_mode_ == "physical_guiding") {
       if (!request_arm_controller_switch(true)) {
@@ -675,6 +697,28 @@ private:
     } else {
       RCLCPP_WARN(
         this->get_logger(), "Button 2 registration rejected: %s", response->message.c_str());
+    }
+  }
+
+  void try_auto_register_rcm()
+  {
+    const rclcpp::Time now = this->get_clock()->now();
+    if ((now - last_auto_registration_attempt_).seconds() < 0.5) {
+      return;
+    }
+    last_auto_registration_attempt_ = now;
+
+    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    auto response = std::make_shared<std_srvs::srv::Trigger::Response>();
+    register_rcm_callback(request, response);
+    if (response->success) {
+      RCLCPP_INFO(
+        this->get_logger(), "Automatic inserted-tool registration: %s",
+        response->message.c_str());
+    } else {
+      RCLCPP_INFO_THROTTLE(
+        this->get_logger(), *this->get_clock(), 2000,
+        "Waiting to auto-register the inserted tool: %s", response->message.c_str());
     }
   }
 
@@ -1393,6 +1437,9 @@ private:
 
     if (state_ == TeleopState::REGISTRATION) {
       publish_zero_velocity();
+      if (auto_register_rcm_ && !rcm_registered_) {
+        try_auto_register_rcm();
+      }
       return;
     }
 
@@ -1784,6 +1831,7 @@ private:
   double tool_length_;
   double min_insertion_depth_;
   double max_insertion_depth_;
+  double registration_insertion_depth_;
   double rcm_hole_diameter_;
   double shaft_marker_extension_;
   double rcm_warning_error_;
@@ -1827,6 +1875,8 @@ private:
   std::string servo_joint_command_topic_;
   std::string controller_state_topic_;
   std::string positioning_mode_;
+  bool start_in_registration_;
+  bool auto_register_rcm_;
   std::string controller_switch_service_;
   std::string arm_controller_name_;
   double positioning_max_linear_vel_;
@@ -1838,6 +1888,7 @@ private:
   rclcpp::Time last_joint_state_receipt_time_;
   rclcpp::Time last_joint_motion_time_;
   rclcpp::Time last_controller_switch_attempt_;
+  rclcpp::Time last_auto_registration_attempt_;
   bool have_recent_joint_state_;
   rclcpp::Time last_servo_joint_command_time_;
   rclcpp::Time last_controller_state_time_;

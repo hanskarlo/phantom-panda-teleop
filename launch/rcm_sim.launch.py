@@ -21,10 +21,10 @@ def generate_launch_description():
         default_value='false',
         description='Use the physical Geomagic Touch instead of simulated haptic input'
     )
-    positioning_mode_arg = DeclareLaunchArgument(
-        'positioning_mode',
-        default_value='haptic_jog',
-        description='Registration positioning: haptic_jog, fixed, or physical_guiding'
+    registration_insertion_depth_arg = DeclareLaunchArgument(
+        'registration_insertion_depth',
+        default_value='0.08',
+        description='Simulated shaft insertion marked from trocar to distal tip (m)'
     )
     device_name_arg = DeclareLaunchArgument(
         'device_name',
@@ -66,7 +66,11 @@ def generate_launch_description():
             'device_name': LaunchConfiguration('device_name'),
             'use_haptic_driver': LaunchConfiguration('use_haptic_driver'),
             'use_rcm': 'true',
-            'positioning_mode': LaunchConfiguration('positioning_mode'),
+            'positioning_mode': 'fixed',
+            'start_in_registration': 'true',
+            'auto_register_rcm': 'true',
+            'registration_insertion_depth':
+                LaunchConfiguration('registration_insertion_depth'),
             'controller_switch_service':
                 '/rcm_sim_control/controller_manager/switch_controller',
             'controller_state_topic':
@@ -85,7 +89,7 @@ def generate_launch_description():
     return LaunchDescription([
         headless_arg,
         use_haptic_driver_arg,
-        positioning_mode_arg,
+        registration_insertion_depth_arg,
         device_name_arg,
         robot,
         servo,

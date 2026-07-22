@@ -48,6 +48,21 @@ def generate_launch_description():
         default_value='fixed',
         description='Registration positioning: fixed, haptic_jog, or physical_guiding'
     )
+    start_in_registration_arg = DeclareLaunchArgument(
+        'start_in_registration',
+        default_value='false',
+        description='Skip HOMING and start with the already-positioned tool in REGISTRATION'
+    )
+    auto_register_rcm_arg = DeclareLaunchArgument(
+        'auto_register_rcm',
+        default_value='false',
+        description='Automatically capture the stationary inserted-tool RCM at startup'
+    )
+    registration_insertion_depth_arg = DeclareLaunchArgument(
+        'registration_insertion_depth',
+        default_value='0.08',
+        description='Tip distance beyond the trocar marker during RCM registration (m)'
+    )
     controller_switch_service_arg = DeclareLaunchArgument(
         'controller_switch_service',
         default_value='/controller_manager/switch_controller',
@@ -83,6 +98,10 @@ def generate_launch_description():
                 'use_rcm': LaunchConfiguration('use_rcm'),
                 'controller_state_topic': LaunchConfiguration('controller_state_topic'),
                 'positioning_mode': LaunchConfiguration('positioning_mode'),
+                'start_in_registration': LaunchConfiguration('start_in_registration'),
+                'auto_register_rcm': LaunchConfiguration('auto_register_rcm'),
+                'registration_insertion_depth':
+                    LaunchConfiguration('registration_insertion_depth'),
                 'controller_switch_service':
                     LaunchConfiguration('controller_switch_service'),
                 'arm_controller_name': LaunchConfiguration('arm_controller_name'),
@@ -97,6 +116,9 @@ def generate_launch_description():
         use_haptic_driver_arg,
         controller_state_topic_arg,
         positioning_mode_arg,
+        start_in_registration_arg,
+        auto_register_rcm_arg,
+        registration_insertion_depth_arg,
         controller_switch_service_arg,
         arm_controller_name_arg,
         touch_driver_launch,

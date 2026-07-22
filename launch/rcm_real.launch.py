@@ -24,6 +24,11 @@ def generate_launch_description():
         default_value='false',
         description='Run without RViz'
     )
+    registration_insertion_depth_arg = DeclareLaunchArgument(
+        'registration_insertion_depth',
+        default_value='0.08',
+        description='Shaft-marker distance from trocar to distal tool tip (m)'
+    )
 
     robot = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -59,7 +64,11 @@ def generate_launch_description():
             'device_name': LaunchConfiguration('device_name'),
             'use_haptic_driver': 'true',
             'use_rcm': 'true',
-            'positioning_mode': 'haptic_jog',
+            'positioning_mode': 'fixed',
+            'start_in_registration': 'true',
+            'auto_register_rcm': 'false',
+            'registration_insertion_depth':
+                LaunchConfiguration('registration_insertion_depth'),
             'controller_switch_service':
                 '/controller_manager/switch_controller',
             'arm_controller_name': 'fr3_arm_controller',
@@ -72,6 +81,7 @@ def generate_launch_description():
         robot_ip_arg,
         device_name_arg,
         headless_arg,
+        registration_insertion_depth_arg,
         robot,
         servo,
         teleop,

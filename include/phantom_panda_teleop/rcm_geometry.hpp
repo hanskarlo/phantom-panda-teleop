@@ -25,6 +25,22 @@ struct CartesianRcmTarget
   double insertion;
 };
 
+inline Eigen::Vector3d rcmFromInsertedToolTip(
+  const Eigen::Vector3d & tip_position,
+  const Eigen::Vector3d & flange_to_tip_axis,
+  double insertion_depth)
+{
+  if (!tip_position.allFinite() || !flange_to_tip_axis.allFinite() ||
+    flange_to_tip_axis.norm() < 1e-9 || !std::isfinite(insertion_depth) ||
+    insertion_depth < 0.0)
+  {
+    throw std::invalid_argument("Inserted-tool RCM registration inputs are invalid.");
+  }
+
+  // The trocar lies insertion_depth back from the distal tip toward the flange.
+  return tip_position - insertion_depth * flange_to_tip_axis.normalized();
+}
+
 inline Eigen::Vector3d shaftAxisFromAngles(double theta, double phi)
 {
   return Eigen::Vector3d(

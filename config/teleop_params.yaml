@@ -19,6 +19,8 @@
     tool_length: 0.25
     min_insertion_depth: 0.0
     max_insertion_depth: 0.23
+    # Circumferential shaft mark placed 80 mm proximal from the distal tool tip.
+    registration_insertion_depth: 0.08
     # Trocar aperture is a 30 mm circle in a plane parallel to link0 XY.
     rcm_hole_diameter: 0.03
     shaft_marker_extension: 0.15
@@ -40,6 +42,8 @@
     # fixed: capture current pose; haptic_jog: slow free Cartesian positioning;
     # physical_guiding: optional controller release/restore fallback.
     positioning_mode: "fixed"
+    start_in_registration: false
+    auto_register_rcm: false
     controller_switch_service: "/controller_manager/switch_controller"
     arm_controller_name: "fr3_arm_controller"
     positioning_max_linear_vel: 0.01

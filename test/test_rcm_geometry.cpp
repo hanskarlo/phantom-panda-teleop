@@ -11,6 +11,7 @@ using phantom_panda_teleop::blendShaftDirectionNearApex;
 using phantom_panda_teleop::cartesianTipTargetWithRcm;
 using phantom_panda_teleop::flangeTargetFromSpherical;
 using phantom_panda_teleop::pointToShaftLineDistance;
+using phantom_panda_teleop::rcmFromInsertedToolTip;
 using phantom_panda_teleop::shaftAxisFromAngles;
 using phantom_panda_teleop::sphericalStateFromFlange;
 
@@ -126,4 +127,24 @@ TEST(RcmGeometry, ShaftDirectionTransitionsContinuouslyFromApex)
   EXPECT_GT(halfway.dot(start), target.dot(start));
   EXPECT_GT(halfway.dot(target), start.dot(target));
   EXPECT_TRUE(after_transition.isApprox(target, 1e-12));
+}
+
+TEST(RcmGeometry, InsertedTipMarkerReconstructsRcmAndInsertion)
+{
+  const Eigen::Vector3d rcm(0.45, -0.08, 0.22);
+  const Eigen::Vector3d shaft_axis =
+    phantom_panda_teleop::shaftAxisFromAngles(0.4, 0.25);
+  const Eigen::Vector3d flange_to_tip_axis = -shaft_axis;
+  constexpr double tool_length = 0.25;
+  constexpr double insertion = 0.08;
+  const Eigen::Vector3d flange = rcm + (tool_length - insertion) * shaft_axis;
+  const Eigen::Vector3d tip = flange + tool_length * flange_to_tip_axis;
+
+  const Eigen::Vector3d reconstructed_rcm =
+    rcmFromInsertedToolTip(tip, flange_to_tip_axis, insertion);
+  const SphericalRcmState state = sphericalStateFromFlange(
+    flange, reconstructed_rcm, tool_length);
+
+  EXPECT_TRUE(reconstructed_rcm.isApprox(rcm, 1e-12));
+  EXPECT_NEAR(state.insertion, insertion, 1e-12);
 }

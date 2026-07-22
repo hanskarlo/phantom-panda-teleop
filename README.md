@@ -24,18 +24,18 @@ Below is the high-level data flow representing how the master device controls th
 
 The node operates a strict internal state machine to manage safety, calibration, and user interaction:
 
-* **`HOMING`**: Safe positioning state. With either fake or real robot hardware, Button 1 is a low-speed, unconstrained Cartesian positioning deadman. Release Button 1, let the robot settle, then press Button 2 to capture the aligned RCM and advance.
-* **`REGISTRATION`**: Optional stationary capture phase entered by `~/proceed`. Button 2 or `~/register_rcm` performs the same guarded capture. A pressed clutch, stale feedback, or joint motion above the registration tolerance is rejected.
+* **`HOMING`**: Optional legacy positioning state for alternate workflows. The inserted-tool `rcm_sim` and `rcm_real` launches skip it completely.
+* **`REGISTRATION`**: Stationary inserted-tool capture phase. The shaft's 80 mm marker must already be at the trocar; registration reconstructs the RCM 80 mm back from the distal tip along the shaft. Simulation captures automatically, while physical hardware requires Button 2 or `~/register_rcm` confirmation.
 * **`CLUTCHED`**: The robot's position is frozen (zero velocity is published) while the operator's hand is off the deadman switch (Button 1 = `0`). This allows the operator to comfortably reposition their hand/stylus.
 * **`ACTIVE`**: The deadman clutch is engaged (Button 1 = `1`). Stylus movements are dynamically mapped to the robot, enforcing the RCM constraint.
 * **`SAFETY_HALT`**: Halts all robot motions immediately if safety violations, singularities, or collisions are detected.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> HOMING
+    [*] --> REGISTRATION : Inserted-tool RCM launches
+    [*] --> HOMING : Optional positioning workflow
 
     HOMING --> HOMING : Hold Button 1\n[haptic positioning jog]
-    HOMING --> CLUTCHED : Release, settle, press Button 2\n[register RCM]
     HOMING --> REGISTRATION : Optional ~/proceed\n[service workflow]
     HOMING --> CLUTCHED : Release and call ~/proceed\n[stationary, use_rcm=false]
 
@@ -92,8 +92,9 @@ All parameters are configured in [config/teleop_params.yaml](file:///home/tbs-pa
 | `rcm_y` | `double` | `0.0` | Initial $Y$ coordinate of the RCM point in the robot base frame (meters). |
 | `rcm_z` | `double` | `0.2` | Initial $Z$ coordinate of the RCM point in the robot base frame (meters). |
 | `tool_length` | `double` | `0.25` | Length of the custom tool attachment (meters). |
-| `min_insertion_depth` | `double` | `0.0` | Minimum insertion from the registered tool-tip-at-trocar pose (meters). |
+| `min_insertion_depth` | `double` | `0.0` | Minimum permitted tip distance beyond the trocar (meters). |
 | `max_insertion_depth` | `double` | `0.23` | Maximum insertion into the trainer box (meters); must remain below `tool_length`. |
+| `registration_insertion_depth` | `double` | `0.08` | Known tip distance beyond the trocar when the shaft marker is aligned; mark the shaft 80 mm from its distal tip. |
 | `rcm_hole_diameter` | `double` | `0.03` | Diameter of the horizontal trocar aperture shown in RViz (meters). |
 | `shaft_marker_extension` | `double` | `0.15` | Distance that the shaft alignment line extends beyond the tool tip (meters). |
 | `rcm_warning_error` | `double` | `0.002` | Measured shaft-line miss that turns the registered RCM marker red (meters). |
@@ -102,7 +103,9 @@ All parameters are configured in [config/teleop_params.yaml](file:///home/tbs-pa
 | `k_linear` | `double` | `0.2` | Scaling factor for direct Cartesian translation (only used when `use_rcm` is false). |
 | `robot_state_timeout` | `double` | `0.10` | Maximum accepted robot TF and direct joint-state feedback age (seconds). |
 | `command_chain_timeout` | `double` | `0.25` | Maximum age of Servo output or arm-controller state before reporting a command-chain fault. |
-| `positioning_mode` | `string` | `"fixed"` | `fixed`, haptic-driven `haptic_jog`, or optional `physical_guiding`. Both top-level RCM launch files select `haptic_jog`. |
+| `positioning_mode` | `string` | `"fixed"` | `fixed`, haptic-driven `haptic_jog`, or optional `physical_guiding`. Both top-level RCM launches use `fixed`. |
+| `start_in_registration` | `bool` | `false` | Skip `HOMING` and begin with an already positioned, inserted tool. Enabled by both RCM launches. |
+| `auto_register_rcm` | `bool` | `false` | Automatically capture after stationary feedback. Enabled only by `rcm_sim`; physical capture remains operator-confirmed. |
 | `controller_switch_service` | `string` | `"/controller_manager/switch_controller"` | Controller-manager service used to release and restore the real arm controller. |
 | `arm_controller_name` | `string` | `"fr3_arm_controller"` | Arm command controller managed during physical guiding. |
 | `positioning_max_linear_vel` | `double` | `0.01` | Maximum unconstrained simulation positioning speed (m/s). |
@@ -140,7 +143,7 @@ You can inspect parameters on the active `/phantom_panda_teleop_node` with stand
    ```
 
 > [!NOTE]
-> `rcm_x/y/z` define the orange pre-registration candidate marker. A successful `/phantom_panda_teleop_node/register_rcm` call replaces them with the captured tool-tip coordinates on the running parameter server.
+> `rcm_x/y/z` define only the pre-registration candidate marker. Inserted-tool registration replaces them with $\mathbf p_{tip}-r_{reg}\mathbf z_{ee}$, where $r_{reg}$ is `registration_insertion_depth` and $\mathbf z_{ee}$ points from flange to tip.
 
 ---
 
@@ -251,32 +254,34 @@ ros2 control list_controllers \
 
 The RViz overlay uses:
 
-- Orange ring: unregistered 30 mm RCM candidate, parallel to the `fr3_link0` XY plane.
+- Blue shaft band: the 80 mm insertion mark that represents the trocar plane.
+- Orange ring: brief pre-registration candidate, parallel to the `fr3_link0` XY plane.
 - Cyan line: measured shaft centerline and its extension.
 - Green ring: registered shaft miss is within `rcm_warning_error`.
 - Red ring/segment: measured shaft miss exceeds the warning threshold.
 
-While still in `HOMING`, engage the positioning deadman and command the simulated
-haptic. This motion is deliberately unconstrained and limited to 0.01 m/s and
-0.05 rad/s so the red tip and cyan shaft can be aligned with the orange candidate:
+The fake robot's existing startup pose is treated as already inserted through a trocar
+at the blue band. The launch skips `HOMING`, starts in `REGISTRATION`, and automatically
+computes the trocar as
+
+$$\mathbf p_{rcm}=\mathbf p_{tip}-0.08\mathbf z_{ee}.$$
+
+After stationary feedback has been present for `registration_settle_time`, state changes
+automatically to `CLUTCHED` (`2`). There is no initial jog or Button 2 registration step:
 
 ```bash
-ros2 service call /sim_haptic/set_clutch std_srvs/srv/SetBool "{data: true}"
-ros2 topic pub --rate 50 /sim_haptic/twist_cmd geometry_msgs/msg/TwistStamped \
-  "{twist: {linear: {x: 0.005, y: 0.0, z: 0.0}}}"
+ros2 topic echo --once /phantom_panda_teleop_node/state
 ```
 
-Stop the publisher, release the deadman, and wait at least 0.5 seconds. Simulate a
-Button 2 press and release to register directly from `HOMING`:
+Override the simulated marker depth only if the URDF marker is changed to match:
 
 ```bash
-ros2 service call /sim_haptic/set_clutch std_srvs/srv/SetBool "{data: false}"
-ros2 service call /sim_haptic/set_button2 std_srvs/srv/SetBool "{data: true}"
-ros2 service call /sim_haptic/set_button2 std_srvs/srv/SetBool "{data: false}"
+ros2 launch phantom_panda_teleop rcm_sim.launch.py \
+  registration_insertion_depth:=0.08
 ```
 
-Registration enters `CLUTCHED`. Engage the deadman again to start RCM-constrained
-teleoperation; input stops automatically 150 ms after Twist messages stop:
+Engage the deadman to start RCM-constrained teleoperation; simulated input stops
+automatically 150 ms after Twist messages stop:
 
 ```bash
 ros2 service call /sim_haptic/set_clutch std_srvs/srv/SetBool "{data: true}"
@@ -297,11 +302,12 @@ ros2 launch phantom_panda_teleop rcm_real.launch.py \
   robot_ip:=<ROBOT_IP> device_name:="BioRob Haptic Device"
 ```
 
-The arm controller remains active. In `HOMING`, hold haptic Button 1 and move the
-physical haptic to jog the FR3 at the restricted positioning limits. Align the red
-tool-tip marker and cyan shaft line with the orange RCM marker, release Button 1,
-and wait at least 0.5 seconds. Press and release Button 2 to capture the RCM. Do not
-re-engage Button 1 until teleop state is `2` (`CLUTCHED`):
+Before running this command, attach the tool, use the Franka's manual guiding controls,
+insert it through the trocar, and align the center of the circumferential band located
+80 mm from the distal tip with the trocar plane. Release all guiding controls and start
+the launch without moving the robot. It starts directly in `REGISTRATION`; after
+stationary feedback is available, press and release Button 2 to confirm the capture.
+Do not press Button 1 until state is `2` (`CLUTCHED`):
 
 ```bash
 ros2 control list_controllers -c /controller_manager
@@ -346,11 +352,12 @@ or jerk discontinuity reflex. Both stages ramp safely toward zero when input bec
 stale.
 
 The arm controller is intentionally streaming-only and does not expose a
-`FollowJointTrajectory` action. Use the haptic `HOMING` jog before starting
-RCM-constrained teleoperation.
+`FollowJointTrajectory` action. Position and insert the physical tool before starting
+the RCM launch.
 
 #### 4. Calibrate and Teleoperate
-1. Under `HOMING`, hold Button 1 to jog with either the simulated or physical haptic and align the red tool tip/cyan shaft with the orange RCM marker.
-2. Release Button 1 and wait for the robot to remain stationary for `registration_settle_time`.
-3. Press and release Button 2. A successful capture moves directly to state `2` (`CLUTCHED`); a rejected capture leaves the node in `HOMING` so alignment can be corrected.
-4. Hold Button 1 to enter `ACTIVE`. Button 2 now publishes the placeholder custom-tool open/close state.
+1. Mark the physical shaft circumferentially 80 mm from the distal tip.
+2. Before launch, manually guide the FR3 and align the band center with the trocar plane.
+3. Release manual control and launch the stack without disturbing the pose.
+4. Simulation registers automatically. On physical hardware, wait for state `1` and press Button 2; successful capture advances to state `2` (`CLUTCHED`).
+5. Hold Button 1 to enter `ACTIVE`. Button 2 now publishes the placeholder custom-tool open/close state.
