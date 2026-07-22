@@ -11,7 +11,7 @@ Below is the high-level data flow representing how the master device controls th
 ```
 [ Master Device ]                              [ Teleop Mapping Node ]                         [ Slave Robot ]
 3D Systems Touch  -->  ~/joy (100Hz+)  -->   Filters -> RCM Constraint Logic  -->  TwistStamped  -->  MoveIt 2 Servo  -->  Franka Arm
-                        (Stylus state)       (Butterworth & Deadband)            (Cartesian Vel)     (Joint Positions)    (ros2_control)
+                        (Stylus state)       (Butterworth & Deadband)            (Cartesian Vel)     (Joint Velocities)   (1 kHz limiter)
 ```
 
 1. **Haptic Interface Layer (Master)**: The driver publishes haptic device states (stylus 6-DoF pose and stylus button presses).
@@ -24,8 +24,8 @@ Below is the high-level data flow representing how the master device controls th
 
 The node operates a strict internal state machine to manage safety, calibration, and user interaction:
 
-* **`HOMING`**: Initial state where the robot arm configuration is prepared. The operator manually guides the robot flange to the initial position above the trainer box, then presses the front button on the stylus (or calls the `~/proceed` service) to transition.
-* **`REGISTRATION`**: Alignment phase for Trocar calibration. The operator places the physical tool tip at the center of the trocar port and calls the `~/register_rcm` service. The node computes the 3D Remote Center of Motion (RCM) point and transitions to `CLUTCHED`.
+* **`HOMING`**: Safe positioning state. With either fake or real robot hardware, Button 1 is a low-speed, unconstrained Cartesian positioning deadman. Release Button 1, let the robot settle, then press Button 2 to capture the aligned RCM and advance.
+* **`REGISTRATION`**: Optional stationary capture phase entered by `~/proceed`. Button 2 or `~/register_rcm` performs the same guarded capture. A pressed clutch, stale feedback, or joint motion above the registration tolerance is rejected.
 * **`CLUTCHED`**: The robot's position is frozen (zero velocity is published) while the operator's hand is off the deadman switch (Button 1 = `0`). This allows the operator to comfortably reposition their hand/stylus.
 * **`ACTIVE`**: The deadman clutch is engaged (Button 1 = `1`). Stylus movements are dynamically mapped to the robot, enforcing the RCM constraint.
 * **`SAFETY_HALT`**: Halts all robot motions immediately if safety violations, singularities, or collisions are detected.
@@ -34,13 +34,17 @@ The node operates a strict internal state machine to manage safety, calibration,
 stateDiagram-v2
     [*] --> HOMING
 
-    HOMING --> REGISTRATION : Haptic Button 1 press OR ~/proceed service\n[if use_rcm == true]
-    HOMING --> CLUTCHED : Haptic Button 1 press OR ~/proceed service\n[if use_rcm == false]
+    HOMING --> HOMING : Hold Button 1\n[haptic positioning jog]
+    HOMING --> CLUTCHED : Release, settle, press Button 2\n[register RCM]
+    HOMING --> REGISTRATION : Optional ~/proceed\n[service workflow]
+    HOMING --> CLUTCHED : Release and call ~/proceed\n[stationary, use_rcm=false]
 
-    REGISTRATION --> CLUTCHED : ~/register_rcm service
+    REGISTRATION --> CLUTCHED : Button 2 or ~/register_rcm
 
     CLUTCHED --> ACTIVE : Haptic Button 1 press (Clutch Engaged)
     ACTIVE --> CLUTCHED : Haptic Button 1 release (Clutch Disengaged)
+    CLUTCHED --> CLUTCHED : Button 2\n[placeholder custom tool]
+    ACTIVE --> ACTIVE : Button 2\n[placeholder custom tool]
     ACTIVE --> CLUTCHED : Max velocity exceeded (Haptic Warning)
 
     ACTIVE --> SAFETY_HALT : TF lookup fails OR haptic data is stale (age > timeout)
@@ -73,7 +77,8 @@ All parameters are configured in [config/teleop_params.yaml](file:///home/tbs-pa
 | `haptic_base_frame` | `string` | `"touch_x_base"` | TF frame ID representing the base of the haptic device. |
 | `haptic_ee_frame` | `string` | `"touch_x_ee"` | TF frame ID representing the end-effector/stylus of the haptic device. |
 | `robot_base_frame` | `string` | `"fr3_link0"` | TF frame ID representing the base of the Franka robot. |
-| `robot_ee_frame` | `string` | `"fr3_hand"` | TF frame ID representing the end-effector/flange of the Franka robot. |
+| `robot_ee_frame` | `string` | `"fr3_link8"` | Franka flange TF frame. The Franka Hand is not loaded. |
+| `robot_tool_tip_frame` | `string` | `"biorob_tool_tip"` | Explicit tool-tip TF captured when registering the trocar center. |
 | `k_theta` | `double` | `2.0` | Scaling factor mapping haptic stylus lateral offset to azimuth angle ($\theta$). |
 | `k_phi` | `double` | `2.0` | Scaling factor mapping haptic stylus vertical offset to elevation angle ($\phi$). |
 | `k_r` | `double` | `0.5` | Scaling factor mapping haptic stylus depth offset to tool insertion depth ($r$). |
@@ -84,20 +89,37 @@ All parameters are configured in [config/teleop_params.yaml](file:///home/tbs-pa
 | `rcm_y` | `double` | `0.0` | Initial $Y$ coordinate of the RCM point in the robot base frame (meters). |
 | `rcm_z` | `double` | `0.2` | Initial $Z$ coordinate of the RCM point in the robot base frame (meters). |
 | `tool_length` | `double` | `0.25` | Length of the custom tool attachment (meters). |
-| `gripper_action_name`| `string` | `"/franka_gripper/gripper_action"` | ROS 2 action name for controlling the Franka gripper. |
-| `gripper_open_width` | `double` | `0.08` | Fully opened gripper width (meters). |
-| `gripper_close_width`| `double` | `0.00` | Fully closed gripper width (meters). |
-| `gripper_force` | `double` | `10.0` | Grip/clamping force limit (Newtons). |
+| `min_insertion_depth` | `double` | `0.0` | Minimum insertion from the registered tool-tip-at-trocar pose (meters). |
+| `max_insertion_depth` | `double` | `0.23` | Maximum insertion into the trainer box (meters); must remain below `tool_length`. |
+| `rcm_hole_diameter` | `double` | `0.03` | Diameter of the horizontal trocar aperture shown in RViz (meters). |
+| `shaft_marker_extension` | `double` | `0.15` | Distance that the shaft alignment line extends beyond the tool tip (meters). |
+| `rcm_warning_error` | `double` | `0.002` | Measured shaft-line miss that turns the registered RCM marker red (meters). |
+| `custom_tool_state_topic` | `string` | `"~/custom_tool_closed"` | Placeholder custom-tool output; `false=open`, `true=closed`. |
 | `use_rcm` | `bool` | `true` | Enables Remote Center of Motion constraints when true. If false, maps inputs directly to Cartesian coordinates. |
 | `k_linear` | `double` | `0.2` | Scaling factor for direct Cartesian translation (only used when `use_rcm` is false). |
+| `k_rotation` | `double` | `0.3` | Scaling factor for direct Cartesian orientation (only used when `use_rcm` is false). |
+| `robot_state_timeout` | `double` | `0.10` | Maximum accepted robot TF and direct joint-state feedback age (seconds). |
+| `command_chain_timeout` | `double` | `0.25` | Maximum age of Servo output or arm-controller state before reporting a command-chain fault. |
+| `positioning_mode` | `string` | `"fixed"` | `fixed`, haptic-driven `haptic_jog`, or optional `physical_guiding`. Both top-level RCM launch files select `haptic_jog`. |
+| `controller_switch_service` | `string` | `"/controller_manager/switch_controller"` | Controller-manager service used to release and restore the real arm controller. |
+| `arm_controller_name` | `string` | `"fr3_arm_controller"` | Arm command controller managed during physical guiding. |
+| `positioning_max_linear_vel` | `double` | `0.01` | Maximum unconstrained simulation positioning speed (m/s). |
+| `positioning_max_angular_vel` | `double` | `0.05` | Maximum unconstrained simulation positioning angular speed (rad/s). |
+| `registration_joint_velocity_tolerance` | `double` | `0.01` | Maximum joint speed accepted for proceeding or RCM capture (rad/s). |
+| `registration_settle_time` | `double` | `0.5` | Required stationary interval before proceeding or capture (seconds). |
+| `joint_velocity_halt_limits` | `double[]` | `[0.4, 0.4, 0.4, 0.4, 0.8, 0.8, 0.8]` | Measured joint-speed guards that transition active teleoperation to `SAFETY_HALT`. |
 | `kp_pos` | `double` | `12.0` | Closed-loop proportional tracking gain for Cartesian positions. |
 | `kp_rot` | `double` | `8.0` | Closed-loop proportional tracking gain for Cartesian orientations. |
 | `max_linear_vel` | `double` | `0.15` | Limit for Cartesian linear velocity command (meters/sec). |
 | `max_angular_vel` | `double` | `0.5` | Limit for Cartesian angular velocity command (rad/sec). |
+| `max_linear_accel` | `double` | `0.15` | Cartesian linear acceleration limit (meters/sec²). |
+| `max_angular_accel` | `double` | `0.6` | Cartesian angular acceleration limit (rad/sec²). |
+| `max_linear_jerk` | `double` | `1.0` | Cartesian linear jerk limit (meters/sec³). |
+| `max_angular_jerk` | `double` | `4.0` | Cartesian angular jerk limit (rad/sec³). |
 
-### Dynamically Modifying Parameters via ROS 2 CLI
+### Inspecting and Configuring Parameters
 
-You can query and set parameters on the active `/phantom_panda_teleop_node` dynamically using standard `ros2 param` commands:
+You can inspect parameters on the active `/phantom_panda_teleop_node` with standard ROS 2 commands. Mapping and safety values are loaded at node startup, so change the YAML or pass a different `params_file` and restart the node when tuning them.
 
 1. **List all active parameters:**
    ```bash
@@ -109,20 +131,14 @@ You can query and set parameters on the active `/phantom_panda_teleop_node` dyna
    ros2 param get /phantom_panda_teleop_node use_rcm
    ```
 
-3. **Dynamically set/update a parameter (e.g., change `k_theta` scaling or toggle `use_rcm`):**
+3. **Change a value for the next launch:**
    ```bash
-   # Toggle RCM constraints
-   ros2 param set /phantom_panda_teleop_node use_rcm false
-
-   # Update active scaling factors
-   ros2 param set /phantom_panda_teleop_node k_theta 1.5
-
-   # Update safety velocity bounds
-   ros2 param set /phantom_panda_teleop_node max_linear_vel 0.20
+   # Edit config/teleop_params.yaml, rebuild if not using a symlink install,
+   # then restart teleop.launch.py or rcm_sim.launch.py.
    ```
 
 > [!NOTE]
-> Parameter updates targeting RCM coordinates (`rcm_x`, `rcm_y`, `rcm_z`) will take effect the next time the registration service `/phantom_panda_teleop_node/register_rcm` is called.
+> `rcm_x/y/z` define the orange pre-registration candidate marker. A successful `/phantom_panda_teleop_node/register_rcm` call replaces them with the captured tool-tip coordinates on the running parameter server.
 
 ---
 
@@ -132,21 +148,27 @@ You can query and set parameters on the active `/phantom_panda_teleop_node` dyna
 * **`/geomagic_touch_x/joy`** (`sensor_msgs/msg/Joy`):
   Listens to haptic buttons.
   - Button 1 (Front Button): Clutch deadman switch.
-  - Button 2 (Rear Button): Gripper toggle switch.
+  - Button 2 (Rear Button): RCM capture during `HOMING`/`REGISTRATION`; placeholder custom-tool toggle after capture.
 
 ### Publications
 * **`/servo_node/delta_twist_cmds`** (`geometry_msgs/msg/TwistStamped`):
   Cartesian velocity commands published to MoveIt Servo at the frequency specified by `update_rate`.
+* **`~/state`** (`std_msgs/msg/Int8`):
+  Current state for diagnostics and rosbag capture (`0=HOMING`, `1=REGISTRATION`, `2=CLUTCHED`, `3=ACTIVE`, `4=SAFETY_HALT`).
+* **`~/rcm_markers`** (`visualization_msgs/msg/MarkerArray`):
+  The 30 mm horizontal trocar ring, exact RCM center, live shaft centerline, lateral-error line, and status label for RViz.
+* **`~/rcm_error`** (`std_msgs/msg/Float64`):
+  Shortest distance in meters between the registered RCM center and the measured flange-Z shaft line.
+* **`~/custom_tool_closed`** (`std_msgs/msg/Bool`):
+  Latched placeholder state for the future custom tool. Button 2 publishes `true` for close and `false` for open after RCM registration.
 
 ### Services
 * **`~/register_rcm`** (`std_srvs/srv/Trigger`):
-  Queries the robot's current pose, computes the RCM trocar center based on the configured tool length and orientation, and registers it. Transitions state from `REGISTRATION` to `CLUTCHED`.
+  Service alternative to Button 2. It captures `biorob_tool_tip`, updates `rcm_x/y/z`, and transitions from `REGISTRATION` to `CLUTCHED`. Capture is rejected for a pressed clutch, moving/stale robot feedback, or a tool-tip frame not aligned with flange local +Z.
 * **`~/proceed`** (`std_srvs/srv/Trigger`):
-  Proceeds from the initial manual `HOMING` state. Transition will proceed to `REGISTRATION` if `use_rcm` is true, otherwise directly to `CLUTCHED`.
+  Proceeds from `HOMING` only after positioning controls are released and the arm is stationary. The transition goes to `REGISTRATION` if `use_rcm` is true, otherwise to `CLUTCHED` after any required controller reactivation.
 
-### Action Clients
-* **`/franka_gripper/gripper_action`** (`control_msgs/action/GripperCommand`):
-  Used to command gripper open/close states triggered by stylus Button 2.
+The Franka Hand and `franka_gripper` driver are intentionally absent from both launch paths.
 
 ---
 
@@ -166,6 +188,127 @@ colcon build --packages-select phantom_panda_teleop --symlink-install --cmake-ar
 
 ### Launch Steps
 
+#### MoveIt planning and execution from RViz
+
+The planning launch is independent of the teleoperation stack. It starts
+`move_group`, RViz, the BioRob tool model, and a trajectory controller exposing
+`/fr3_arm_controller/follow_joint_trajectory`.
+
+Test with fake hardware first:
+
+```bash
+ros2 launch phantom_panda_teleop moveit_rviz.launch.py
+```
+
+In RViz, select `fr3_arm` in the MotionPlanning panel, drag the goal-state
+interactive marker, choose **Plan**, and then **Execute**. The fake-hardware path
+uses a position interface so the commanded motion is visible in RViz.
+
+For the physical FR3, unlock the robot and enable its external activation mode,
+then run:
+
+```bash
+ros2 launch phantom_panda_teleop moveit_rviz.launch.py \
+  use_fake_hardware:=false robot_ip:=<ROBOT_IP>
+```
+
+The physical path uses an effort-command `JointTrajectoryController` with the
+standard Franka joint gains. RViz defaults to 10% velocity and acceleration
+scaling. Do not run this launch at the same time as `rcm_real.launch.py` or
+`biorob_moveit.launch.py`; each launch owns the arm hardware and activates a
+different controller named `fr3_arm_controller`.
+
+#### One-command RViz simulation
+
+This path uses fake FR3 hardware and a fresh 200 Hz simulated haptic TF/Joy source:
+
+```bash
+ros2 launch phantom_panda_teleop rcm_sim.launch.py
+```
+
+To control the same fake FR3 simulation with a paired physical Geomagic Touch,
+replace the simulated haptic source with the real driver:
+
+```bash
+ros2 launch phantom_panda_teleop rcm_sim.launch.py \
+  use_haptic_driver:=true device_name:=left
+```
+
+Set `device_name` to the exact OpenHaptics name configured during pairing. The
+launch argument is `use_haptic_driver` (including the final `r`). Only one of the
+real or simulated haptic sources is launched.
+
+The simulation controller manager is isolated at
+`/rcm_sim_control/controller_manager`, so it does not collide with a separately running
+Franka `/controller_manager`. Confirm both simulation controllers with:
+
+```bash
+ros2 control list_controllers \
+  --controller-manager /rcm_sim_control/controller_manager
+```
+
+The RViz overlay uses:
+
+- Orange ring: unregistered 30 mm RCM candidate, parallel to the `fr3_link0` XY plane.
+- Cyan line: measured shaft centerline and its extension.
+- Green ring: registered shaft miss is within `rcm_warning_error`.
+- Red ring/segment: measured shaft miss exceeds the warning threshold.
+
+While still in `HOMING`, engage the positioning deadman and command the simulated
+haptic. This motion is deliberately unconstrained and limited to 0.01 m/s and
+0.05 rad/s so the red tip and cyan shaft can be aligned with the orange candidate:
+
+```bash
+ros2 service call /sim_haptic/set_clutch std_srvs/srv/SetBool "{data: true}"
+ros2 topic pub --rate 50 /sim_haptic/twist_cmd geometry_msgs/msg/TwistStamped \
+  "{twist: {linear: {x: 0.005, y: 0.0, z: 0.0}}}"
+```
+
+Stop the publisher, release the deadman, and wait at least 0.5 seconds. Simulate a
+Button 2 press and release to register directly from `HOMING`:
+
+```bash
+ros2 service call /sim_haptic/set_clutch std_srvs/srv/SetBool "{data: false}"
+ros2 service call /sim_haptic/set_button2 std_srvs/srv/SetBool "{data: true}"
+ros2 service call /sim_haptic/set_button2 std_srvs/srv/SetBool "{data: false}"
+```
+
+Registration enters `CLUTCHED`. Engage the deadman again to start RCM-constrained
+teleoperation; input stops automatically 150 ms after Twist messages stop:
+
+```bash
+ros2 service call /sim_haptic/set_clutch std_srvs/srv/SetBool "{data: true}"
+```
+
+Monitor the numerical constraint error independently of RViz:
+
+```bash
+ros2 topic echo /phantom_panda_teleop_node/rcm_error
+```
+
+#### Physical FR3 and physical haptic
+
+The real-hardware launch is intentionally separate from `rcm_sim.launch.py`:
+
+```bash
+ros2 launch phantom_panda_teleop rcm_real.launch.py \
+  robot_ip:=<ROBOT_IP> device_name:="BioRob Haptic Device"
+```
+
+The arm controller remains active. In `HOMING`, hold haptic Button 1 and move the
+physical haptic to jog the FR3 at the restricted positioning limits. Align the red
+tool-tip marker and cyan shaft line with the orange RCM marker, release Button 1,
+and wait at least 0.5 seconds. Press and release Button 2 to capture the RCM. Do not
+re-engage Button 1 until teleop state is `2` (`CLUTCHED`):
+
+```bash
+ros2 control list_controllers -c /controller_manager
+ros2 topic echo --once /phantom_panda_teleop_node/state
+```
+
+After registration, Button 2 toggles the placeholder `~/custom_tool_closed` output.
+No Franka gripper process, finger model, or gripper controller is loaded.
+
 #### 1. Start MoveIt, controllers, and robot hardware/simulation
 For simulation/fake hardware:
 ```bash
@@ -176,25 +319,36 @@ For physical robot:
 ros2 launch phantom_panda_teleop biorob_moveit.launch.py use_fake_hardware:=false robot_ip:=<ROBOT_IP>
 ```
 
-#### 2. Launch the Teleop node & Haptic Driver
+#### 2. Start MoveIt Servo and the velocity bridge
+```bash
+ros2 launch phantom_panda_teleop servo.launch.py use_fake_hardware:=<true-for-fake-or-false-for-physical>
+```
+
+#### 3. Launch the Teleop node & Haptic Driver
 ```bash
 ros2 launch phantom_panda_teleop teleop.launch.py use_rcm:=true
 ```
 *(Optionally override the parameter configuration file by passing `params_file:=/path/to/yaml`)*
 
-#### 3. Start MoveIt Servo Node
-```bash
-ros2 launch phantom_panda_teleop servo.launch.py use_fake_hardware:=true
-```
+Servo intentionally runs without a pose-IK plugin and uses its differential Jacobian
+solver for streamed Cartesian twists. The startup warning
+`No kinematics solver instantiated ... Will use inverse Jacobian` is therefore expected;
+the unified launch does not start MoveGroup or planned trajectory execution.
+
+`servo.launch.py` also starts a bounded 100 Hz velocity bridge. The
+`RealtimeServoVelocityController` consumes that stream in the ros2_control 1 kHz
+update loop and rate-limits every individual hardware command. This final real-time
+stage is important: limiting only successive ROS messages still creates 10 ms
+velocity steps at the FCI interface, which can trigger libfranka's joint acceleration
+or jerk discontinuity reflex. Both stages ramp safely toward zero when input becomes
+stale.
+
+The arm controller is intentionally streaming-only and does not expose a
+`FollowJointTrajectory` action. Use the haptic `HOMING` jog before starting
+RCM-constrained teleoperation.
 
 #### 4. Calibrate and Teleoperate
-1. Under `HOMING` state, manually guide the robot flange to the initial configuration above the trainer box.
-2. Press the stylus front button or call the service:
-   ```bash
-   ros2 service call /phantom_panda_teleop_node/proceed std_srvs/srv/Trigger
-   ```
-3. Under `REGISTRATION` state, position the tool tip at the trocar center and register the RCM:
-   ```bash
-   ros2 service call /phantom_panda_teleop_node/register_rcm std_srvs/srv/Trigger
-   ```
-4. Now in `CLUTCHED` state, hold the stylus front button to enter `ACTIVE` state and start teleoperating!
+1. Under `HOMING`, hold Button 1 to jog with either the simulated or physical haptic and align the red tool tip/cyan shaft with the orange RCM marker.
+2. Release Button 1 and wait for the robot to remain stationary for `registration_settle_time`.
+3. Press and release Button 2. A successful capture moves directly to state `2` (`CLUTCHED`); a rejected capture leaves the node in `HOMING` so alignment can be corrected.
+4. Hold Button 1 to enter `ACTIVE`. Button 2 now publishes the placeholder custom-tool open/close state.
