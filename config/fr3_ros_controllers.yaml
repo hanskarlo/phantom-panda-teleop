@@ -38,5 +38,8 @@
       command_timeout: 0.05
       state_publish_rate: 50.0
       max_joint_velocity: [0.20, 0.20, 0.20, 0.20, 0.30, 0.30, 0.30]
-      max_joint_acceleration: [0.50, 0.50, 0.50, 0.50, 1.00, 1.00, 1.00]
-      max_joint_jerk: [500.0, 500.0, 500.0, 500.0, 1000.0, 1000.0, 1000.0]
+      # Conservative real-hardware limits: retain the velocity envelope above, but
+      # smooth reversals and RCM pivots enough to avoid FCI acceleration-discontinuity
+      # reflexes when the stylus reference changes quickly.
+      max_joint_acceleration: [0.30, 0.30, 0.30, 0.30, 0.50, 0.50, 0.50]
+      max_joint_jerk: [75.0, 75.0, 75.0, 75.0, 150.0, 150.0, 150.0]

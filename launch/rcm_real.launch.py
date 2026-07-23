@@ -12,6 +12,7 @@ def generate_launch_description():
 
     robot_ip_arg = DeclareLaunchArgument(
         'robot_ip',
+        default_value='192.168.1.11',
         description='Hostname or IP address of the physical Franka robot'
     )
     device_name_arg = DeclareLaunchArgument(
@@ -21,7 +22,7 @@ def generate_launch_description():
     )
     headless_arg = DeclareLaunchArgument(
         'headless',
-        default_value='false',
+        default_value='true',
         description='Run without RViz'
     )
     registration_insertion_depth_arg = DeclareLaunchArgument(
