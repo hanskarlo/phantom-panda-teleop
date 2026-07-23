@@ -11,9 +11,14 @@
     tip_position_scale: 0.2
     enable_haptic_roll: true
     # Touch X positive roll is opposite the tool's positive axial roll.
-    haptic_roll_scale: -1.0
+    haptic_roll_scale: -0.2
     haptic_roll_deadband: 0.01
-    max_tilt_angle: 0.52
+    # The 8 mm instrument is operated inside a 60 deg RCM cone.  The 70 deg
+    # hard limit was established empirically with the physical trocar setup.
+    # Between these limits the node stays RCM-constrained and projects targets
+    # inward, allowing recovery without disabling the constraint.
+    command_max_tilt_angle: 1.0471975512  # 60 deg
+    hard_max_tilt_angle: 1.2217304764     # 70 deg
     # Blend shaft direction over the first 20 mm to avoid an orientation step at r=0.
     tip_direction_transition_depth: 0.02
     deadband_position: 0.0005
@@ -28,10 +33,11 @@
     registration_insertion_depth: 0.08
     # Trocar aperture is a 30 mm circle in a plane parallel to link0 XY.
     rcm_hole_diameter: 0.03
+    shaft_diameter: 0.008
     shaft_marker_extension: 0.15
     rcm_warning_error: 0.002
     # Reject teleoperation if calibration already leaves the shaft off-axis.
-    rcm_activation_max_error: 0.0015
+    rcm_activation_max_error: 0.003
     # Freeze before a measured shaft miss can load the trocar boundary.
     rcm_halt_error: 0.004
     # Proportional recovery of a small measured RCM miss [1/s].

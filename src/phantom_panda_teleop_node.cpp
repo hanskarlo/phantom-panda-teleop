@@ -133,7 +133,10 @@ public:
     this->declare_parameter("enable_haptic_roll", true);
     this->declare_parameter("haptic_roll_scale", 1.0);
     this->declare_parameter("haptic_roll_deadband", 0.01);
-    this->declare_parameter("max_tilt_angle", 0.52); // maximum shaft tilt from base +Z
+    // The command cone is an interior operating workspace. The hard limit is the
+    // empirically validated physical boundary for the 8 mm shaft/trocar setup.
+    this->declare_parameter("command_max_tilt_angle", M_PI / 3.0);       // 60 deg
+    this->declare_parameter("hard_max_tilt_angle", 7.0 * M_PI / 18.0);  // 70 deg
     this->declare_parameter("tip_direction_transition_depth", 0.02);
     this->declare_parameter("deadband_position", 0.0005); // 0.5 mm deadband
     this->declare_parameter("cutoff_freq", 5.0); // 5 Hz tremor low-pass cutoff
@@ -145,6 +148,7 @@ public:
     this->declare_parameter("max_insertion_depth", 0.23);
     this->declare_parameter("registration_insertion_depth", 0.08);
     this->declare_parameter("rcm_hole_diameter", 0.03);
+    this->declare_parameter("shaft_diameter", 0.008);
     this->declare_parameter("shaft_marker_extension", 0.15);
     this->declare_parameter("rcm_warning_error", 0.002);
     this->declare_parameter("rcm_activation_max_error", 0.0015);
@@ -198,7 +202,8 @@ public:
     this->get_parameter("enable_haptic_roll", enable_haptic_roll_);
     this->get_parameter("haptic_roll_scale", haptic_roll_scale_);
     this->get_parameter("haptic_roll_deadband", haptic_roll_deadband_);
-    this->get_parameter("max_tilt_angle", max_tilt_angle_);
+    this->get_parameter("command_max_tilt_angle", command_max_tilt_angle_);
+    this->get_parameter("hard_max_tilt_angle", hard_max_tilt_angle_);
     this->get_parameter("tip_direction_transition_depth", tip_direction_transition_depth_);
     this->get_parameter("deadband_position", deadband_position_);
     this->get_parameter("cutoff_freq", cutoff_freq_);
@@ -207,6 +212,7 @@ public:
     this->get_parameter("max_insertion_depth", max_insertion_depth_);
     this->get_parameter("registration_insertion_depth", registration_insertion_depth_);
     this->get_parameter("rcm_hole_diameter", rcm_hole_diameter_);
+    this->get_parameter("shaft_diameter", shaft_diameter_);
     this->get_parameter("shaft_marker_extension", shaft_marker_extension_);
     this->get_parameter("rcm_warning_error", rcm_warning_error_);
     this->get_parameter("rcm_activation_max_error", rcm_activation_max_error_);
@@ -253,12 +259,14 @@ public:
     }
     if (tip_position_scale_ < 0.0 || !std::isfinite(haptic_roll_scale_) ||
       haptic_roll_deadband_ < 0.0 || k_linear_ < 0.0 ||
-      max_tilt_angle_ < 0.0 || max_tilt_angle_ >= M_PI_2 ||
+      command_max_tilt_angle_ < 0.0 || hard_max_tilt_angle_ <= command_max_tilt_angle_ ||
+      hard_max_tilt_angle_ >= M_PI_2 ||
       tip_direction_transition_depth_ <= 0.0 ||
       haptic_timeout_ <= 0.0 || robot_state_timeout_ <= 0.0 || command_chain_timeout_ <= 0.0)
     {
       throw std::invalid_argument(
-              "Position scales must be nonnegative, max_tilt_angle must be in [0, pi/2), "
+              "Position scales must be nonnegative, command_max_tilt_angle must be below "
+              "hard_max_tilt_angle in [0, pi/2), "
               "and transition depth/timeouts must be positive.");
     }
     if (joint_velocity_halt_limits_.size() != 7 ||
@@ -280,14 +288,15 @@ public:
       throw std::invalid_argument(
               "registration_insertion_depth must lie within the configured insertion limits.");
     }
-    if (rcm_hole_diameter_ <= 0.0 || shaft_marker_extension_ < 0.0 ||
+    if (rcm_hole_diameter_ <= 0.0 || shaft_diameter_ <= 0.0 ||
+      shaft_diameter_ >= rcm_hole_diameter_ || shaft_marker_extension_ < 0.0 ||
       rcm_warning_error_ < 0.0 || rcm_activation_max_error_ < 0.0 ||
       rcm_halt_error_ <= 0.0 || rcm_halt_error_ < rcm_activation_max_error_ ||
       rcm_correction_gain_ < 0.0)
     {
       throw std::invalid_argument(
-              "RCM thresholds must be nonnegative, halt error must exceed activation error, "
-              "and correction gain must be nonnegative.");
+        "The shaft diameter must fit the RCM hole; RCM thresholds must be nonnegative, "
+        "halt error must exceed activation error, and correction gain must be nonnegative.");
     }
     if (positioning_mode_ != "fixed" && positioning_mode_ != "haptic_jog" &&
       positioning_mode_ != "physical_guiding")
@@ -1135,11 +1144,24 @@ private:
           start_insertion, min_insertion_depth_, max_insertion_depth_);
         return false;
       }
-      if (start_state.phi > max_tilt_angle_) {
+      if (start_state.phi >= hard_max_tilt_angle_) {
+        state_ = TeleopState::SAFETY_HALT;
+        publish_zero_velocity();
         RCLCPP_ERROR(
-          this->get_logger(), "Robot is tilted too far from RCM constraint (phi = %.2f rad). Please reposition.",
-          start_state.phi);
+          this->get_logger(),
+          "SAFETY HALT: Shaft tilt %.1f deg reached the %.1f deg hard physical limit. "
+          "Reposition the instrument below the limit before resetting.",
+          start_state.phi * 180.0 / M_PI, hard_max_tilt_angle_ * 180.0 / M_PI);
         return false;
+      }
+      if (start_state.phi > command_max_tilt_angle_) {
+        RCLCPP_WARN(
+          this->get_logger(),
+          "Shaft tilt %.1f deg exceeds the %.1f deg interior command cone but is below the "
+          "%.1f deg hard limit. RCM recovery is active: hold the clutch and the projected "
+          "target will bring the shaft back inside the 60 deg cone.",
+          start_state.phi * 180.0 / M_PI, command_max_tilt_angle_ * 180.0 / M_PI,
+          hard_max_tilt_angle_ * 180.0 / M_PI);
       }
 
       // The haptic controls only the Cartesian tool-tip position. Preserve the current
@@ -1377,7 +1399,8 @@ private:
     shaft.type = visualization_msgs::msg::Marker::LINE_STRIP;
     shaft.action = visualization_msgs::msg::Marker::ADD;
     shaft.pose.orientation.w = 1.0;
-    shaft.scale.x = 0.002;
+    // RViz line width represents the physical 8 mm instrument shaft.
+    shaft.scale.x = shaft_diameter_;
     shaft.color.r = 0.05;
     shaft.color.g = 0.75;
     shaft.color.b = 1.0;
@@ -1732,6 +1755,33 @@ private:
     Eigen::Quaterniond cmd_q;
 
     if (enforce_rcm && use_rcm_) {
+      // The command workspace is intentionally smaller than the empirically
+      // validated physical limit. Between the two, we retain RCM control and
+      // project toward the interior cone so the operator can recover without
+      // releasing the tool or disabling the constraint.
+      const auto measured_rcm_state = phantom_panda_teleop::sphericalStateFromFlange(
+        p_curr, rcm_position_, tool_length_);
+      if (measured_rcm_state.phi >= hard_max_tilt_angle_) {
+        state_ = TeleopState::SAFETY_HALT;
+        reset_command_limiter();
+        publish_zero_velocity();
+        RCLCPP_ERROR(
+          this->get_logger(),
+          "SAFETY HALT: Shaft tilt %.1f deg reached the %.1f deg hard physical limit.",
+          measured_rcm_state.phi * 180.0 / M_PI,
+          hard_max_tilt_angle_ * 180.0 / M_PI);
+        return;
+      }
+      if (measured_rcm_state.phi > command_max_tilt_angle_) {
+        RCLCPP_WARN_THROTTLE(
+          this->get_logger(), *this->get_clock(), 1000,
+          "Shaft tilt %.1f deg exceeds the %.1f deg interior command cone; "
+          "RCM recovery is projecting targets inward (hard limit %.1f deg).",
+          measured_rcm_state.phi * 180.0 / M_PI,
+          command_max_tilt_angle_ * 180.0 / M_PI,
+          hard_max_tilt_angle_ * 180.0 / M_PI);
+      }
+
       // 4. Command a scaled Cartesian tool-tip displacement. Haptic orientation is
       // deliberately ignored; only the clutch-relative haptic position is used.
       const Eigen::Vector3d desired_tip =
@@ -1749,7 +1799,7 @@ private:
       // insertion interval, then reconstruct the unique RCM-valid flange position.
       auto target = phantom_panda_teleop::cartesianTipTargetWithRcm(
         desired_tip, rcm_position_, rcm_start_shaft_axis_, tool_length_,
-        min_insertion_depth_, max_insertion_depth_, max_tilt_angle_);
+        min_insertion_depth_, max_insertion_depth_, command_max_tilt_angle_);
 
       // A point at the RCM has no direction. Blend the complete shaft direction away
       // from the clutch-time axis near the cone apex so neither tilt nor azimuth can
@@ -1960,7 +2010,8 @@ private:
   bool enable_haptic_roll_;
   double haptic_roll_scale_;
   double haptic_roll_deadband_;
-  double max_tilt_angle_;
+  double command_max_tilt_angle_;
+  double hard_max_tilt_angle_;
   double tip_direction_transition_depth_;
   double deadband_position_;
   double cutoff_freq_;
@@ -1969,6 +2020,7 @@ private:
   double max_insertion_depth_;
   double registration_insertion_depth_;
   double rcm_hole_diameter_;
+  double shaft_diameter_;
   double shaft_marker_extension_;
   double rcm_warning_error_;
   double rcm_activation_max_error_;
