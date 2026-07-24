@@ -134,6 +134,9 @@ public:
     this->declare_parameter("enable_haptic_roll", true);
     this->declare_parameter("haptic_roll_scale", 1.0);
     this->declare_parameter("haptic_roll_deadband", 0.01);
+    this->declare_parameter("haptic_roll_kp", 2.0);
+    this->declare_parameter("haptic_roll_max_velocity", 0.20);
+    this->declare_parameter("flange_roll_velocity_topic", "~/flange_roll_velocity");
     // The command cone is an interior operating workspace. The hard limit is the
     // empirically validated physical boundary for the 8 mm shaft/trocar setup.
     this->declare_parameter("command_max_tilt_angle", M_PI / 3.0);       // 60 deg
@@ -213,6 +216,9 @@ public:
     this->get_parameter("enable_haptic_roll", enable_haptic_roll_);
     this->get_parameter("haptic_roll_scale", haptic_roll_scale_);
     this->get_parameter("haptic_roll_deadband", haptic_roll_deadband_);
+    this->get_parameter("haptic_roll_kp", haptic_roll_kp_);
+    this->get_parameter("haptic_roll_max_velocity", haptic_roll_max_velocity_);
+    this->get_parameter("flange_roll_velocity_topic", flange_roll_velocity_topic_);
     this->get_parameter("command_max_tilt_angle", command_max_tilt_angle_);
     this->get_parameter("hard_max_tilt_angle", hard_max_tilt_angle_);
     this->get_parameter("enable_tilt_haptic_cue", enable_tilt_haptic_cue_);
@@ -280,7 +286,8 @@ public:
       throw std::invalid_argument("Update rate and Cartesian motion limits must all be positive.");
     }
     if (tip_position_scale_ < 0.0 || !std::isfinite(haptic_roll_scale_) ||
-      haptic_roll_deadband_ < 0.0 || k_linear_ < 0.0 ||
+      haptic_roll_deadband_ < 0.0 || haptic_roll_kp_ <= 0.0 ||
+      haptic_roll_max_velocity_ <= 0.0 || k_linear_ < 0.0 ||
       command_max_tilt_angle_ < 0.0 || hard_max_tilt_angle_ <= command_max_tilt_angle_ ||
       hard_max_tilt_angle_ >= M_PI_2 ||
       tilt_cue_force_ < 0.0 || tilt_cue_force_ > 1.0 ||
@@ -291,7 +298,8 @@ public:
       haptic_timeout_ <= 0.0 || robot_state_timeout_ <= 0.0 || command_chain_timeout_ <= 0.0)
     {
       throw std::invalid_argument(
-              "Position scales must be nonnegative, command_max_tilt_angle must be below "
+              "Position scales must be nonnegative, roll gains/limits must be positive, "
+              "command_max_tilt_angle must be below "
               "hard_max_tilt_angle in [0, pi/2), "
               "haptic cue forces must be in [0, 1] N, and transition depth/timeouts must be positive.");
     }
@@ -408,6 +416,8 @@ public:
     rcm_marker_pub_ =
       this->create_publisher<visualization_msgs::msg::MarkerArray>("~/rcm_markers", 10);
     rcm_error_pub_ = this->create_publisher<std_msgs::msg::Float64>("~/rcm_error", 10);
+    flange_roll_velocity_pub_ = this->create_publisher<std_msgs::msg::Float64>(
+      flange_roll_velocity_topic_, 10);
 
     // Setup calibration services
     register_rcm_srv_ = this->create_service<std_srvs::srv::Trigger>(
@@ -922,14 +932,15 @@ private:
 
   void joint_state_callback(const sensor_msgs::msg::JointState::SharedPtr msg)
   {
-    if (msg->name.size() != msg->velocity.size()) {
+    if (msg->name.size() != msg->velocity.size() || msg->name.size() != msg->position.size()) {
       RCLCPP_WARN_THROTTLE(
         this->get_logger(), *this->get_clock(), 2000,
-        "Ignoring arm joint state with missing velocity data.");
+        "Ignoring arm joint state with missing position or velocity data.");
       return;
     }
 
     std::array<double, 7> measured_velocities{};
+    std::array<double, 7> measured_positions{};
     for (size_t joint_index = 0; joint_index < joint_velocity_halt_limits_.size(); ++joint_index) {
       const std::string joint_name = "fr3_joint" + std::to_string(joint_index + 1);
       const auto name_it = std::find(msg->name.begin(), msg->name.end(), joint_name);
@@ -942,10 +953,12 @@ private:
 
       const size_t state_index = static_cast<size_t>(std::distance(msg->name.begin(), name_it));
       measured_velocities[joint_index] = msg->velocity[state_index];
+      measured_positions[joint_index] = msg->position[state_index];
     }
 
     const rclcpp::Time joint_state_time = this->get_clock()->now();
     latest_joint_velocities_ = measured_velocities;
+    latest_joint_positions_ = measured_positions;
     const double maximum_measured_velocity = *std::max_element(
       measured_velocities.begin(), measured_velocities.end(),
       [](double left, double right) {return std::abs(left) < std::abs(right);});
@@ -1140,6 +1153,7 @@ private:
     haptic_last_rot_.normalize();
     haptic_filtered_rot_ = haptic_last_rot_;
     haptic_roll_angle_ = 0.0;
+    haptic_roll_joint_start_ = latest_joint_positions_[6];
 
     // Register initial robot state
     robot_start_pos_ = Eigen::Vector3d(
@@ -1647,6 +1661,16 @@ private:
     twist_msg.twist.angular.y = 0.0;
     twist_msg.twist.angular.z = 0.0;
     twist_pub_->publish(twist_msg);
+    publish_flange_roll_velocity(0.0);
+  }
+
+  void publish_flange_roll_velocity(double velocity)
+  {
+    std_msgs::msg::Float64 roll_msg;
+    roll_msg.data = std::clamp(
+      std::isfinite(velocity) ? velocity : 0.0,
+      -haptic_roll_max_velocity_, haptic_roll_max_velocity_);
+    flange_roll_velocity_pub_->publish(roll_msg);
   }
 
   void publish_haptic_force(double force_x)
@@ -1986,15 +2010,12 @@ private:
         rcm_position_ + (tool_length_ - target.insertion) * blended_axis;
       cmd_pos = target.flange_position;
 
-      // 6. The RCM geometry determines the tool axis. Axial roll is not observable from
-      // a point target, so preserve the roll present when the clutch was engaged.
+      // 6. The RCM geometry determines the tool axis. Axial roll is handled by the
+      // dedicated fr3_joint7 path below, not through Cartesian IK.
       const Eigen::Vector3d z_ee = -target.shaft_axis;
       const Eigen::Quaterniond shaft_alignment =
         Eigen::Quaterniond::FromTwoVectors(rcm_start_z_axis_, z_ee);
-      const double commanded_roll = std::abs(haptic_roll_angle_) < haptic_roll_deadband_ ?
-        0.0 : haptic_roll_angle_;
-      cmd_q = Eigen::Quaterniond(Eigen::AngleAxisd(commanded_roll, z_ee)) *
-        shaft_alignment * robot_start_rot_;
+      cmd_q = shaft_alignment * robot_start_rot_;
       cmd_q.normalize();
     } else {
       // Position-only direct Cartesian mapping. Haptic orientation is intentionally ignored.
@@ -2030,6 +2051,22 @@ private:
       const double angle = 2.0 * std::atan2(q_err_vec_norm, q_err.w());
       rot_err = angle * q_err_vec / q_err_vec_norm;
     }
+
+    // A stylus roll must never become a Cartesian angular command: Servo can realize
+    // such a command through several joints. Remove the axial component and send roll
+    // only to fr3_joint7, whose axis is the flange/tool shaft axis.
+    const Eigen::Vector3d current_shaft_axis =
+      q_curr.toRotationMatrix().col(2).normalized();
+    rot_err -= rot_err.dot(current_shaft_axis) * current_shaft_axis;
+
+    double flange_roll_velocity = 0.0;
+    if (enable_haptic_roll_) {
+      const double roll_target = std::abs(haptic_roll_angle_) < haptic_roll_deadband_ ?
+        0.0 : haptic_roll_angle_;
+      const double joint7_offset = latest_joint_positions_[6] - haptic_roll_joint_start_;
+      flange_roll_velocity = haptic_roll_kp_ * (roll_target - joint7_offset);
+    }
+    publish_flange_roll_velocity(flange_roll_velocity);
 
     Eigen::Vector3d v_cmd_base;
     Eigen::Vector3d w_cmd_base;
@@ -2182,6 +2219,9 @@ private:
   bool enable_haptic_roll_;
   double haptic_roll_scale_;
   double haptic_roll_deadband_;
+  double haptic_roll_kp_;
+  double haptic_roll_max_velocity_;
+  std::string flange_roll_velocity_topic_;
   double command_max_tilt_angle_;
   double hard_max_tilt_angle_;
   bool enable_tilt_haptic_cue_;
@@ -2229,6 +2269,7 @@ private:
   Eigen::Quaterniond haptic_last_rot_;
   Eigen::Quaterniond haptic_filtered_rot_;
   double haptic_roll_angle_;
+  double haptic_roll_joint_start_;
 
   // Direct Cartesian tracking start offsets
   Eigen::Vector3d robot_start_pos_;
@@ -2261,6 +2302,7 @@ private:
   double registration_settle_time_;
   std::vector<double> joint_velocity_halt_limits_;
   std::array<double, 7> latest_joint_velocities_;
+  std::array<double, 7> latest_joint_positions_;
   rclcpp::Time last_joint_state_receipt_time_;
   rclcpp::Time last_joint_motion_time_;
   rclcpp::Time last_controller_switch_attempt_;
@@ -2314,6 +2356,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr custom_tool_state_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr rcm_marker_pub_;
   rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr rcm_error_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr flange_roll_velocity_pub_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr register_rcm_srv_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr proceed_srv_;
   rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedPtr

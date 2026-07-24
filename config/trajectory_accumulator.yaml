@@ -3,6 +3,8 @@
     input_topic: "/servo_node/joint_trajectory_raw"
     output_topic: "/fr3_arm_controller/joint_trajectory"
     controller_state_topic: "/fr3_arm_controller/controller_state"
+    # Dedicated joint-space override for flange/tool axial roll (fr3_joint7).
+    flange_roll_velocity_topic: "/phantom_panda_teleop_node/flange_roll_velocity"
     publish_rate: 100.0
     input_timeout: 0.05
     controller_state_timeout: 0.10

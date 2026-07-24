@@ -13,6 +13,11 @@
     # Touch X positive roll is opposite the tool's positive axial roll.
     haptic_roll_scale: -0.2
     haptic_roll_deadband: 0.01
+    # Roll is sent directly to fr3_joint7 (the flange/tool shaft roll joint),
+    # rather than as a Cartesian rotation that MoveIt Servo could distribute.
+    haptic_roll_kp: 2.0
+    haptic_roll_max_velocity: 0.20
+    flange_roll_velocity_topic: "/phantom_panda_teleop_node/flange_roll_velocity"
     # The 8 mm instrument is operated inside a 60 deg RCM cone.  The 70 deg
     # hard limit was established empirically with the physical trocar setup.
     # Between these limits the node stays RCM-constrained and projects targets

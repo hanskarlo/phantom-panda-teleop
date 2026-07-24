@@ -1,5 +1,6 @@
 #include <control_msgs/msg/joint_trajectory_controller_state.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/float64.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 #include <algorithm>
@@ -21,6 +22,9 @@ public:
     declare_parameter("input_topic", "/servo_node/joint_trajectory_raw");
     declare_parameter("output_topic", "/fr3_arm_controller/joint_trajectory");
     declare_parameter("controller_state_topic", "/fr3_arm_controller/controller_state");
+    declare_parameter(
+      "flange_roll_velocity_topic",
+      "/phantom_panda_teleop_node/flange_roll_velocity");
     declare_parameter("publish_rate", 100.0);
     declare_parameter("input_timeout", 0.05);
     declare_parameter("controller_state_timeout", 0.10);
@@ -34,6 +38,7 @@ public:
     get_parameter("input_topic", input_topic_);
     get_parameter("output_topic", output_topic_);
     get_parameter("controller_state_topic", controller_state_topic_);
+    get_parameter("flange_roll_velocity_topic", flange_roll_velocity_topic_);
     get_parameter("publish_rate", publish_rate_);
     get_parameter("input_timeout", input_timeout_);
     get_parameter("controller_state_timeout", controller_state_timeout_);
@@ -65,6 +70,9 @@ public:
     state_sub_ = create_subscription<control_msgs::msg::JointTrajectoryControllerState>(
       controller_state_topic_, 10,
       std::bind(&ServoTrajectoryAccumulator::state_callback, this, std::placeholders::_1));
+    flange_roll_sub_ = create_subscription<std_msgs::msg::Float64>(
+      flange_roll_velocity_topic_, 10,
+      std::bind(&ServoTrajectoryAccumulator::flange_roll_callback, this, std::placeholders::_1));
 
     const auto period = std::chrono::duration<double>(1.0 / publish_rate_);
     timer_ = create_wall_timer(
@@ -156,6 +164,18 @@ private:
     have_input_ = true;
   }
 
+  void flange_roll_callback(const std_msgs::msg::Float64::SharedPtr msg)
+  {
+    if (!std::isfinite(msg->data)) {
+      have_flange_roll_command_ = false;
+      return;
+    }
+    flange_roll_velocity_ = std::clamp(
+      msg->data, -max_joint_velocity_[kJointCount - 1], max_joint_velocity_[kJointCount - 1]);
+    last_flange_roll_command_time_ = now();
+    have_flange_roll_command_ = true;
+  }
+
   void publish_reference()
   {
     if (!have_state_ || !filter_initialized_) {
@@ -182,6 +202,14 @@ private:
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000,
         "Servo raw trajectory is stale; ramping the joint velocity command to zero");
+    }
+
+    // Stylus roll is a joint-space command, deliberately bypassing Cartesian IK.
+    // It overrides only fr3_joint7; joints 1--6 retain the Servo command (or zero).
+    const bool flange_roll_fresh = state_fresh && have_flange_roll_command_ &&
+      (current_time - last_flange_roll_command_time_).seconds() <= input_timeout_;
+    if (flange_roll_fresh) {
+      target_velocities[kJointCount - 1] = flange_roll_velocity_;
     }
 
     for (size_t i = 0; i < kJointCount; ++i) {
@@ -236,6 +264,7 @@ private:
   std::string input_topic_;
   std::string output_topic_;
   std::string controller_state_topic_;
+  std::string flange_roll_velocity_topic_;
   double publish_rate_;
   double input_timeout_;
   double controller_state_timeout_;
@@ -249,11 +278,15 @@ private:
   bool have_state_{false};
   bool have_input_{false};
   bool filter_initialized_{false};
+  bool have_flange_roll_command_{false};
+  double flange_roll_velocity_{0.0};
   rclcpp::Time last_state_time_;
   rclcpp::Time last_input_time_;
   rclcpp::Time last_update_time_;
+  rclcpp::Time last_flange_roll_command_time_;
   rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr input_sub_;
   rclcpp::Subscription<control_msgs::msg::JointTrajectoryControllerState>::SharedPtr state_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr flange_roll_sub_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr output_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
