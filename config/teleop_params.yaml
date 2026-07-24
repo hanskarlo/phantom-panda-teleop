@@ -19,6 +19,19 @@
     # inward, allowing recovery without disabling the constraint.
     command_max_tilt_angle: 1.0471975512  # 60 deg
     hard_max_tilt_angle: 1.2217304764     # 70 deg
+    # A one-shot two-pulse cue is emitted when tilt first crosses the 60 deg
+    # command cone. Its total energized time is 200 ms, far below 3 seconds.
+    enable_tilt_haptic_cue: true
+    haptic_wrench_topic: "/geomagic_touch_x/command/wrench"
+    tilt_cue_force: 0.6                 # N, bounded by the node to <= 1.0 N
+    tilt_cue_pulse_duration: 0.10        # s per pulse
+    tilt_cue_gap_duration: 0.08          # s between opposite-polarity pulses
+    # OpenHaptics raises HD_EXCEEDED_MAX_VELOCITY as Joy button index 2. The
+    # node holds robot motion and gives this distinct, one-shot warning cue.
+    enable_haptic_velocity_cue: true
+    haptic_velocity_cue_force: 0.25      # N, bounded by the node to <= 1.0 N
+    haptic_velocity_cue_pulse_duration: 0.08
+    haptic_velocity_cue_gap_duration: 0.06
     # Blend shaft direction over the first 20 mm to avoid an orientation step at r=0.
     tip_direction_transition_depth: 0.02
     deadband_position: 0.0005
@@ -46,6 +59,8 @@
     custom_tool_state_topic: "/phantom_panda_teleop_node/custom_tool_closed"
     use_rcm: true
     k_linear: 0.2
+    # Clutch-relative, deadbanded and Butterworth-filtered stylus pose for monitoring.
+    filtered_haptic_pose_topic: "/phantom_panda_teleop_node/filtered_haptic_pose"
     robot_state_timeout: 0.10
     command_chain_timeout: 0.25
     joy_topic: "/geomagic_touch_x/joy"

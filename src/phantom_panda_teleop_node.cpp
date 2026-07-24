@@ -1,6 +1,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
+#include <geometry_msgs/msg/wrench.hpp>
 #include <control_msgs/msg/joint_trajectory_controller_state.hpp>
 #include <controller_manager_msgs/srv/switch_controller.hpp>
 #include <sensor_msgs/msg/joy.hpp>
@@ -137,6 +138,15 @@ public:
     // empirically validated physical boundary for the 8 mm shaft/trocar setup.
     this->declare_parameter("command_max_tilt_angle", M_PI / 3.0);       // 60 deg
     this->declare_parameter("hard_max_tilt_angle", 7.0 * M_PI / 18.0);  // 70 deg
+    this->declare_parameter("enable_tilt_haptic_cue", true);
+    this->declare_parameter("haptic_wrench_topic", "/geomagic_touch_x/command/wrench");
+    this->declare_parameter("tilt_cue_force", 0.3);
+    this->declare_parameter("tilt_cue_pulse_duration", 0.10);
+    this->declare_parameter("tilt_cue_gap_duration", 0.08);
+    this->declare_parameter("enable_haptic_velocity_cue", true);
+    this->declare_parameter("haptic_velocity_cue_force", 0.25);
+    this->declare_parameter("haptic_velocity_cue_pulse_duration", 0.08);
+    this->declare_parameter("haptic_velocity_cue_gap_duration", 0.06);
     this->declare_parameter("tip_direction_transition_depth", 0.02);
     this->declare_parameter("deadband_position", 0.0005); // 0.5 mm deadband
     this->declare_parameter("cutoff_freq", 5.0); // 5 Hz tremor low-pass cutoff
@@ -158,6 +168,7 @@ public:
     this->declare_parameter("use_rcm", true);
     this->declare_parameter("k_linear", 0.2);
     this->declare_parameter("haptic_timeout", 0.05); // 50 ms timeout
+    this->declare_parameter("filtered_haptic_pose_topic", "~/filtered_haptic_pose");
     this->declare_parameter("robot_state_timeout", 0.10);
     this->declare_parameter("command_chain_timeout", 0.25);
     this->declare_parameter("joy_topic", "/geomagic_touch_x/joy");
@@ -204,6 +215,16 @@ public:
     this->get_parameter("haptic_roll_deadband", haptic_roll_deadband_);
     this->get_parameter("command_max_tilt_angle", command_max_tilt_angle_);
     this->get_parameter("hard_max_tilt_angle", hard_max_tilt_angle_);
+    this->get_parameter("enable_tilt_haptic_cue", enable_tilt_haptic_cue_);
+    this->get_parameter("haptic_wrench_topic", haptic_wrench_topic_);
+    this->get_parameter("tilt_cue_force", tilt_cue_force_);
+    this->get_parameter("tilt_cue_pulse_duration", tilt_cue_pulse_duration_);
+    this->get_parameter("tilt_cue_gap_duration", tilt_cue_gap_duration_);
+    this->get_parameter("enable_haptic_velocity_cue", enable_haptic_velocity_cue_);
+    this->get_parameter("haptic_velocity_cue_force", haptic_velocity_cue_force_);
+    this->get_parameter(
+      "haptic_velocity_cue_pulse_duration", haptic_velocity_cue_pulse_duration_);
+    this->get_parameter("haptic_velocity_cue_gap_duration", haptic_velocity_cue_gap_duration_);
     this->get_parameter("tip_direction_transition_depth", tip_direction_transition_depth_);
     this->get_parameter("deadband_position", deadband_position_);
     this->get_parameter("cutoff_freq", cutoff_freq_);
@@ -222,6 +243,7 @@ public:
     this->get_parameter("use_rcm", use_rcm_);
     this->get_parameter("k_linear", k_linear_);
     this->get_parameter("haptic_timeout", haptic_timeout_);
+    this->get_parameter("filtered_haptic_pose_topic", filtered_haptic_pose_topic_);
     this->get_parameter("robot_state_timeout", robot_state_timeout_);
     this->get_parameter("command_chain_timeout", command_chain_timeout_);
     this->get_parameter("joy_topic", joy_topic_);
@@ -261,13 +283,17 @@ public:
       haptic_roll_deadband_ < 0.0 || k_linear_ < 0.0 ||
       command_max_tilt_angle_ < 0.0 || hard_max_tilt_angle_ <= command_max_tilt_angle_ ||
       hard_max_tilt_angle_ >= M_PI_2 ||
+      tilt_cue_force_ < 0.0 || tilt_cue_force_ > 1.0 ||
+      tilt_cue_pulse_duration_ <= 0.0 || tilt_cue_gap_duration_ < 0.0 ||
+      haptic_velocity_cue_force_ < 0.0 || haptic_velocity_cue_force_ > 1.0 ||
+      haptic_velocity_cue_pulse_duration_ <= 0.0 || haptic_velocity_cue_gap_duration_ < 0.0 ||
       tip_direction_transition_depth_ <= 0.0 ||
       haptic_timeout_ <= 0.0 || robot_state_timeout_ <= 0.0 || command_chain_timeout_ <= 0.0)
     {
       throw std::invalid_argument(
               "Position scales must be nonnegative, command_max_tilt_angle must be below "
               "hard_max_tilt_angle in [0, pi/2), "
-              "and transition depth/timeouts must be positive.");
+              "haptic cue forces must be in [0, 1] N, and transition depth/timeouts must be positive.");
     }
     if (joint_velocity_halt_limits_.size() != 7 ||
       std::any_of(
@@ -295,8 +321,8 @@ public:
       rcm_correction_gain_ < 0.0)
     {
       throw std::invalid_argument(
-        "The shaft diameter must fit the RCM hole; RCM thresholds must be nonnegative, "
-        "halt error must exceed activation error, and correction gain must be nonnegative.");
+              "The shaft diameter must fit the RCM hole; RCM thresholds must be nonnegative, "
+              "halt error must exceed activation error, and correction gain must be nonnegative.");
     }
     if (positioning_mode_ != "fixed" && positioning_mode_ != "haptic_jog" &&
       positioning_mode_ != "physical_guiding")
@@ -353,6 +379,10 @@ public:
     // MoveIt Servo Cartesian command input publisher
     twist_pub_ = this->create_publisher<geometry_msgs::msg::TwistStamped>(
       servo_twist_topic_, 10);
+    haptic_wrench_pub_ = this->create_publisher<geometry_msgs::msg::Wrench>(
+      haptic_wrench_topic_, 10);
+    filtered_haptic_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
+      filtered_haptic_pose_topic_, 10);
 
     // Servo reports singularity, collision, and joint-bound conditions on this topic.
     servo_status_sub_ = this->create_subscription<std_msgs::msg::Int8>(
@@ -407,6 +437,9 @@ public:
     rcm_registered_ = false;
     haptic_positioning_active_ = false;
     button1_pressed_ = false;
+    tilt_outside_command_cone_ = false;
+    tilt_cue_active_ = false;
+    haptic_velocity_cue_active_ = false;
     controller_switch_pending_ = false;
     guiding_controller_released_ = positioning_mode_ != "physical_guiding";
     latest_joint_velocities_.fill(0.0);
@@ -820,6 +853,7 @@ private:
 
     // Check for haptic device warnings (e.g. max velocity exceeded)
     if (msg->buttons.size() >= 3 && msg->buttons[2] == 1) {
+      start_haptic_velocity_cue();
       if (state_ == TeleopState::ACTIVE) {
         RCLCPP_WARN(
           this->get_logger(),
@@ -1104,6 +1138,7 @@ private:
       return false;
     }
     haptic_last_rot_.normalize();
+    haptic_filtered_rot_ = haptic_last_rot_;
     haptic_roll_angle_ = 0.0;
 
     // Register initial robot state
@@ -1162,6 +1197,10 @@ private:
           "target will bring the shaft back inside the 60 deg cone.",
           start_state.phi * 180.0 / M_PI, command_max_tilt_angle_ * 180.0 / M_PI,
           hard_max_tilt_angle_ * 180.0 / M_PI);
+        tilt_outside_command_cone_ = true;
+        start_tilt_haptic_cue();
+      } else {
+        tilt_outside_command_cone_ = false;
       }
 
       // The haptic controls only the Cartesian tool-tip position. Preserve the current
@@ -1481,12 +1520,14 @@ private:
   void control_loop()
   {
     start_moveit_servo();
+    update_haptic_velocity_cue();
 
     std_msgs::msg::Int8 state_msg;
     state_msg.data = static_cast<int8_t>(state_);
     teleop_state_pub_->publish(state_msg);
 
     if (state_ == TeleopState::SAFETY_HALT) {
+      cancel_haptic_velocity_cue();
       publish_zero_velocity();
       RCLCPP_ERROR_THROTTLE(
         this->get_logger(),
@@ -1595,6 +1636,7 @@ private:
   void publish_zero_velocity()
   {
     reset_command_limiter();
+    cancel_tilt_haptic_cue();
     geometry_msgs::msg::TwistStamped twist_msg;
     twist_msg.header.stamp = this->get_clock()->now();
     twist_msg.header.frame_id = robot_base_frame_;
@@ -1605,6 +1647,100 @@ private:
     twist_msg.twist.angular.y = 0.0;
     twist_msg.twist.angular.z = 0.0;
     twist_pub_->publish(twist_msg);
+  }
+
+  void publish_haptic_force(double force_x)
+  {
+    geometry_msgs::msg::Wrench wrench;
+    // OpenHaptics consumes this in the Touch device's local base frame. A bounded
+    // lateral force makes the two short, opposite-polarity pulses perceptible.
+    wrench.force.x = std::clamp(force_x, -1.0, 1.0);
+    haptic_wrench_pub_->publish(wrench);
+  }
+
+  void start_tilt_haptic_cue()
+  {
+    if (!enable_tilt_haptic_cue_ || tilt_cue_active_) {
+      return;
+    }
+    tilt_cue_active_ = true;
+    tilt_cue_start_time_ = this->get_clock()->now();
+    RCLCPP_WARN(
+      this->get_logger(),
+      "Tilt haptic cue: two %.0f ms pulses at %.2f N.",
+      tilt_cue_pulse_duration_ * 1000.0, tilt_cue_force_);
+  }
+
+  void update_tilt_haptic_cue()
+  {
+    if (!tilt_cue_active_) {
+      return;
+    }
+    const double elapsed = (this->get_clock()->now() - tilt_cue_start_time_).seconds();
+    if (elapsed < tilt_cue_pulse_duration_) {
+      publish_haptic_force(tilt_cue_force_);
+    } else if (elapsed < tilt_cue_pulse_duration_ + tilt_cue_gap_duration_) {
+      publish_haptic_force(0.0);
+    } else if (elapsed < 2.0 * tilt_cue_pulse_duration_ + tilt_cue_gap_duration_) {
+      publish_haptic_force(-tilt_cue_force_);
+    } else {
+      tilt_cue_active_ = false;
+      publish_haptic_force(0.0);
+    }
+  }
+
+  void cancel_tilt_haptic_cue()
+  {
+    if (tilt_cue_active_) {
+      tilt_cue_active_ = false;
+    }
+    if (!haptic_velocity_cue_active_) {
+      publish_haptic_force(0.0);
+    }
+  }
+
+  void start_haptic_velocity_cue()
+  {
+    if (!enable_haptic_velocity_cue_ || haptic_velocity_cue_active_) {
+      return;
+    }
+    haptic_velocity_cue_active_ = true;
+    haptic_velocity_cue_start_time_ = this->get_clock()->now();
+    RCLCPP_WARN(
+      this->get_logger(),
+      "Haptic velocity warning cue: two %.0f ms pulses at %.2f N; robot motion is held.",
+      haptic_velocity_cue_pulse_duration_ * 1000.0, haptic_velocity_cue_force_);
+  }
+
+  void update_haptic_velocity_cue()
+  {
+    if (!haptic_velocity_cue_active_) {
+      return;
+    }
+    const double elapsed =
+      (this->get_clock()->now() - haptic_velocity_cue_start_time_).seconds();
+    if (elapsed < haptic_velocity_cue_pulse_duration_) {
+      publish_haptic_force(haptic_velocity_cue_force_);
+    } else if (
+      elapsed < haptic_velocity_cue_pulse_duration_ + haptic_velocity_cue_gap_duration_)
+    {
+      publish_haptic_force(0.0);
+    } else if (
+      elapsed < 2.0 * haptic_velocity_cue_pulse_duration_ + haptic_velocity_cue_gap_duration_)
+    {
+      publish_haptic_force(-haptic_velocity_cue_force_);
+    } else {
+      haptic_velocity_cue_active_ = false;
+      publish_haptic_force(0.0);
+    }
+  }
+
+  void cancel_haptic_velocity_cue()
+  {
+    if (haptic_velocity_cue_active_) {
+      haptic_velocity_cue_active_ = false;
+    }
+    publish_haptic_force(0.0);
   }
 
   void run_homing_logic()
@@ -1748,6 +1884,34 @@ private:
     // 3. Apply Butterworth filter to suppress user tremor
     Eigen::Vector3d filtered_disp = butterworth_filter_.filter(deadbanded_disp);
 
+    // Smooth orientation independently using the equivalent first-order low-pass
+    // response. Quaternion sign is selected to follow the shortest rotation.
+    Eigen::Quaterniond orientation_for_filter = haptic_rot;
+    if (haptic_filtered_rot_.dot(orientation_for_filter) < 0.0) {
+      orientation_for_filter.coeffs() *= -1.0;
+    }
+    const double orientation_alpha =
+      1.0 - std::exp(-2.0 * M_PI * cutoff_freq_ / update_rate_);
+    haptic_filtered_rot_ = haptic_filtered_rot_.slerp(orientation_alpha, orientation_for_filter);
+    haptic_filtered_rot_.normalize();
+
+    // Publish the diagnostic haptic pose in the haptic base frame. Position uses the
+    // same clutch-relative deadband and Butterworth filter as the teleoperation path.
+    // The orientation uses the low-pass quaternion above. This monitoring output does
+    // not alter the existing robot-command path.
+    geometry_msgs::msg::PoseStamped filtered_haptic_pose;
+    filtered_haptic_pose.header.stamp = haptic_tf.header.stamp;
+    filtered_haptic_pose.header.frame_id = haptic_base_frame_;
+    const Eigen::Vector3d filtered_haptic_position = haptic_start_pos_ + filtered_disp;
+    filtered_haptic_pose.pose.position.x = filtered_haptic_position.x();
+    filtered_haptic_pose.pose.position.y = filtered_haptic_position.y();
+    filtered_haptic_pose.pose.position.z = filtered_haptic_position.z();
+    filtered_haptic_pose.pose.orientation.x = haptic_filtered_rot_.x();
+    filtered_haptic_pose.pose.orientation.y = haptic_filtered_rot_.y();
+    filtered_haptic_pose.pose.orientation.z = haptic_filtered_rot_.z();
+    filtered_haptic_pose.pose.orientation.w = haptic_filtered_rot_.w();
+    filtered_haptic_pose_pub_->publish(filtered_haptic_pose);
+
     // Transform haptic displacement into robot base frame
     Eigen::Vector3d mapped_disp = R_h_r_ * filtered_disp;
 
@@ -1764,6 +1928,7 @@ private:
       if (measured_rcm_state.phi >= hard_max_tilt_angle_) {
         state_ = TeleopState::SAFETY_HALT;
         reset_command_limiter();
+        cancel_tilt_haptic_cue();
         publish_zero_velocity();
         RCLCPP_ERROR(
           this->get_logger(),
@@ -1773,6 +1938,10 @@ private:
         return;
       }
       if (measured_rcm_state.phi > command_max_tilt_angle_) {
+        if (!tilt_outside_command_cone_) {
+          tilt_outside_command_cone_ = true;
+          start_tilt_haptic_cue();
+        }
         RCLCPP_WARN_THROTTLE(
           this->get_logger(), *this->get_clock(), 1000,
           "Shaft tilt %.1f deg exceeds the %.1f deg interior command cone; "
@@ -1780,7 +1949,10 @@ private:
           measured_rcm_state.phi * 180.0 / M_PI,
           command_max_tilt_angle_ * 180.0 / M_PI,
           hard_max_tilt_angle_ * 180.0 / M_PI);
+      } else {
+        tilt_outside_command_cone_ = false;
       }
+      update_tilt_haptic_cue();
 
       // 4. Command a scaled Cartesian tool-tip displacement. Haptic orientation is
       // deliberately ignored; only the clutch-relative haptic position is used.
@@ -2012,6 +2184,15 @@ private:
   double haptic_roll_deadband_;
   double command_max_tilt_angle_;
   double hard_max_tilt_angle_;
+  bool enable_tilt_haptic_cue_;
+  std::string haptic_wrench_topic_;
+  double tilt_cue_force_;
+  double tilt_cue_pulse_duration_;
+  double tilt_cue_gap_duration_;
+  bool enable_haptic_velocity_cue_;
+  double haptic_velocity_cue_force_;
+  double haptic_velocity_cue_pulse_duration_;
+  double haptic_velocity_cue_gap_duration_;
   double tip_direction_transition_depth_;
   double deadband_position_;
   double cutoff_freq_;
@@ -2046,6 +2227,7 @@ private:
   // Clutch start offsets
   Eigen::Vector3d haptic_start_pos_;
   Eigen::Quaterniond haptic_last_rot_;
+  Eigen::Quaterniond haptic_filtered_rot_;
   double haptic_roll_angle_;
 
   // Direct Cartesian tracking start offsets
@@ -2058,6 +2240,7 @@ private:
   bool rcm_registered_;
   double k_linear_;
   double haptic_timeout_;
+  std::string filtered_haptic_pose_topic_;
   double robot_state_timeout_;
   double command_chain_timeout_;
   std::string joy_topic_;
@@ -2092,6 +2275,11 @@ private:
   double max_controller_velocity_error_;
   bool haptic_positioning_active_;
   bool button1_pressed_;
+  bool tilt_outside_command_cone_;
+  bool tilt_cue_active_;
+  rclcpp::Time tilt_cue_start_time_;
+  bool haptic_velocity_cue_active_;
+  rclcpp::Time haptic_velocity_cue_start_time_;
   bool controller_switch_pending_;
   bool guiding_controller_released_;
 
@@ -2120,6 +2308,8 @@ private:
   rclcpp::Subscription<control_msgs::msg::JointTrajectoryControllerState>::SharedPtr
     controller_state_sub_;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr twist_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::Wrench>::SharedPtr haptic_wrench_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr filtered_haptic_pose_pub_;
   rclcpp::Publisher<std_msgs::msg::Int8>::SharedPtr teleop_state_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr custom_tool_state_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr rcm_marker_pub_;

@@ -86,9 +86,19 @@ All parameters are configured in [config/teleop_params.yaml](file:///home/tbs-pa
 | `tip_position_scale` | `double` | `0.2` | Cartesian haptic-position to tool-tip-position scale; 10 mm hand motion requests 2 mm tip motion before RCM projection. |
 | `command_max_tilt_angle` | `double` | `1.0472` | Interior RCM command cone from robot-base $+Z$ (60°). Targets outside it are projected inward. |
 | `hard_max_tilt_angle` | `double` | `1.2217` | Empirically validated physical shaft-tilt limit (70°). Reaching it causes `SAFETY_HALT`. |
+| `enable_tilt_haptic_cue` | `bool` | `true` | Enables the one-shot haptic cue when the shaft crosses the 60° command cone. |
+| `haptic_wrench_topic` | `string` | `"/geomagic_touch_x/command/wrench"` | Touch driver force-command topic. |
+| `tilt_cue_force` | `double` | `0.3` | Magnitude in N of each bounded haptic pulse (capped at 1.0 N). |
+| `tilt_cue_pulse_duration` | `double` | `0.10` | Duration in seconds of each cue pulse. |
+| `tilt_cue_gap_duration` | `double` | `0.08` | Zero-force interval between the two opposite-polarity pulses. |
+| `enable_haptic_velocity_cue` | `bool` | `true` | Enables the one-shot cue after an OpenHaptics maximum-velocity warning. |
+| `haptic_velocity_cue_force` | `double` | `0.25` | Magnitude in N of each haptic-speed warning pulse (capped at 1.0 N). |
+| `haptic_velocity_cue_pulse_duration` | `double` | `0.08` | Duration in seconds of each haptic-speed warning pulse. |
+| `haptic_velocity_cue_gap_duration` | `double` | `0.06` | Zero-force interval between the two haptic-speed warning pulses. |
 | `tip_direction_transition_depth` | `double` | `0.02` | Insertion over which the projected shaft direction blends from its clutch-time direction, preventing tilt or azimuth steps at zero insertion. |
 | `deadband_position` | `double` | `0.0005` | Position deadband in meters ($0.5$ mm) to ignore minor stylus movements/tremor. |
 | `cutoff_freq` | `double` | `5.0` | Cutoff frequency (Hz) for the Butterworth low-pass filter to suppress user hand tremor. |
+| `filtered_haptic_pose_topic` | `string` | `"~/filtered_haptic_pose"` | Monitoring topic for the clutch-relative, deadbanded and Butterworth-filtered stylus position plus low-pass-filtered stylus orientation (`geometry_msgs/PoseStamped`). |
 | `rcm_x` | `double` | `0.4` | Initial $X$ coordinate of the RCM point in the robot base frame (meters). |
 | `rcm_y` | `double` | `0.0` | Initial $Y$ coordinate of the RCM point in the robot base frame (meters). |
 | `rcm_z` | `double` | `0.2` | Initial $Z$ coordinate of the RCM point in the robot base frame (meters). |
