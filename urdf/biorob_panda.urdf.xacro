@@ -46,6 +46,11 @@
   <xacro:property name="biorob_tool_length" value="0.25"/>
   <xacro:property name="biorob_shaft_radius" value="0.003"/>
   <xacro:property name="biorob_tip_radius" value="0.004"/>
+  <!-- Visual-only placeholder grasper dimensions.  The tip frame stays at the
+       shaft endpoint so RCM registration continues to use the same geometry. -->
+  <xacro:property name="biorob_jaw_length" value="0.045"/>
+  <xacro:property name="biorob_jaw_width" value="0.006"/>
+  <xacro:property name="biorob_jaw_height" value="0.004"/>
   <!-- Registration band: 80 mm from the distal tip, matching teleop_params.yaml. -->
   <xacro:property name="biorob_registration_insertion" value="0.08"/>
   <xacro:property name="biorob_registration_marker_width" value="0.004"/>
@@ -109,5 +114,49 @@
     <parent link="biorob_tool_shaft"/>
     <child link="biorob_tool_tip"/>
     <origin xyz="0 0 ${biorob_tool_length}" rpy="0 0 0"/>
+  </joint>
+
+  <!--
+    A simple two-jaw visual model for simulation.  These links deliberately
+    have no collision geometry: MoveIt/RCM continues to model the established
+    shaft and distal-tip sphere, while the jaws make the custom-tool command
+    visible in RViz.
+  -->
+  <link name="biorob_left_jaw">
+    <visual>
+      <origin xyz="0 0 ${biorob_jaw_length / 2.0}" rpy="0 0 0"/>
+      <geometry>
+        <box size="${biorob_jaw_width} ${biorob_jaw_height} ${biorob_jaw_length}"/>
+      </geometry>
+      <material name="biorob_jaw_silver">
+        <color rgba="0.82 0.84 0.88 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="biorob_left_jaw_joint" type="revolute">
+    <parent link="biorob_tool_tip"/>
+    <child link="biorob_left_jaw"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0.0" upper="0.55" effort="1.0" velocity="2.0"/>
+  </joint>
+
+  <link name="biorob_right_jaw">
+    <visual>
+      <origin xyz="0 0 ${biorob_jaw_length / 2.0}" rpy="0 0 0"/>
+      <geometry>
+        <box size="${biorob_jaw_width} ${biorob_jaw_height} ${biorob_jaw_length}"/>
+      </geometry>
+      <material name="biorob_jaw_silver"/>
+    </visual>
+  </link>
+
+  <joint name="biorob_right_jaw_joint" type="revolute">
+    <parent link="biorob_tool_tip"/>
+    <child link="biorob_right_jaw"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.55" upper="0.0" effort="1.0" velocity="2.0"/>
   </joint>
 </robot>

@@ -51,6 +51,18 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /phantom_panda_teleop_node/rcm_markers
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Simulated grasper state
+      Namespaces:
+        {}
+      Topic:
+        Depth: 10
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /sim_grasper_visualizer/markers
+      Value: true
     - Class: rviz_default_plugins/TF
       Enabled: false
       Frame Timeout: 15

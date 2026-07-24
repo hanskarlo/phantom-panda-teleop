@@ -179,6 +179,22 @@ You can inspect parameters on the active `/phantom_panda_teleop_node` with stand
 * **`~/custom_tool_closed`** (`std_msgs/msg/Bool`):
   Latched placeholder state for the future custom tool. Button 2 publishes `true` for close and `false` for open after RCM registration.
 
+When launched through `rcm_sim.launch.py`, this state also drives the visual-only
+placeholder grasper. Its two jaws pivot about `biorob_tool_tip`, while RViz shows
+a green **GRIPPER: OPEN** or red **GRIPPER: CLOSED** status marker. The jaws carry
+no collision geometry, so this does not change RCM registration or MoveIt safety
+behaviour.
+
+For a simulated haptic device, `rcm_sim.launch.py` auto-registers the RCM and
+starts in `CLUTCHED`. Toggle the simulated rear button to test the grasper:
+
+```bash
+ros2 service call /sim_haptic/set_button2 std_srvs/srv/SetBool "{data: true}"
+ros2 service call /sim_haptic/set_button2 std_srvs/srv/SetBool "{data: false}"
+```
+
+The rising edge closes the simulated jaws; the falling edge opens them.
+
 ### Services
 * **`~/register_rcm`** (`std_srvs/srv/Trigger`):
   Service alternative to Button 2. It captures `biorob_tool_tip`, updates `rcm_x/y/z`, and transitions from `REGISTRATION` to `CLUTCHED`. Capture is rejected for a pressed clutch, moving/stale robot feedback, or a tool-tip frame not aligned with flange local +Z.

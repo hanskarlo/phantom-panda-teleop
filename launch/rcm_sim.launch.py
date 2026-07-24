@@ -86,6 +86,16 @@ def generate_launch_description():
         condition=UnlessCondition(LaunchConfiguration('use_haptic_driver'))
     )
 
+    simulated_grasper = Node(
+        package='phantom_panda_teleop',
+        executable='sim_grasper_visualizer_node',
+        name='sim_grasper_visualizer',
+        output='screen',
+        parameters=[{
+            'tool_state_topic': '/phantom_panda_teleop_node/custom_tool_closed',
+        }],
+    )
+
     return LaunchDescription([
         headless_arg,
         use_haptic_driver_arg,
@@ -95,4 +105,5 @@ def generate_launch_description():
         servo,
         teleop,
         simulated_haptic,
+        simulated_grasper,
     ])

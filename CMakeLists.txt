@@ -31,6 +31,7 @@ find_package(franka_msgs REQUIRED)
 add_executable(phantom_panda_teleop_node src/phantom_panda_teleop_node.cpp)
 add_executable(servo_trajectory_accumulator_node src/servo_trajectory_accumulator_node.cpp)
 add_executable(sim_haptic_node src/sim_haptic_node.cpp)
+add_executable(sim_grasper_visualizer_node src/sim_grasper_visualizer_node.cpp)
 add_library(realtime_servo_velocity_controller SHARED
   src/realtime_servo_velocity_controller.cpp)
 target_include_directories(phantom_panda_teleop_node PUBLIC
@@ -67,6 +68,14 @@ ament_target_dependencies(
 )
 
 ament_target_dependencies(
+  sim_grasper_visualizer_node
+  "rclcpp"
+  "sensor_msgs"
+  "std_msgs"
+  "visualization_msgs"
+)
+
+ament_target_dependencies(
   servo_trajectory_accumulator_node
   "rclcpp"
   "trajectory_msgs"
@@ -96,6 +105,7 @@ install(TARGETS
   phantom_panda_teleop_node
   servo_trajectory_accumulator_node
   sim_haptic_node
+  sim_grasper_visualizer_node
   DESTINATION lib/${PROJECT_NAME})
 
 install(TARGETS realtime_servo_velocity_controller
